@@ -1,0 +1,34 @@
+数据库初始化说明
+================
+
+当前迁移策略已固化为一个初始化版本：
+
+- 唯一 Alembic revision：`versions/75f80d2c9c04_initial_schema.py`
+- 唯一初始化 SQL：`init.sql`
+- 历史增量 SQL 变更记录已合并进初始化脚本，不再保留独立修正 migration。
+
+初始化新数据库：
+
+```bash
+cd backend
+alembic upgrade head
+```
+
+重建本系统的开发数据库：
+
+```bash
+cd backend
+alembic upgrade head
+```
+
+先使用 DBX MCP 的 `postgres` 连接执行 `reset.sql`，再运行上述 Alembic 命令。`reset.sql` 会删除本系统的表、枚举类型和 `alembic_version`，不会删除同一数据库中不属于本系统的其他对象。初始化后会创建默认管理员：用户名 `admin`，密码 `123456`。
+
+如果需要直接执行 SQL，优先使用 DBX MCP：
+
+- PostgreSQL 连接名：`postgres`
+- Redis 连接名：`redis`
+- PostgreSQL 默认库：`postgres`
+- SQL 执行：使用 DBX MCP 的 `dbx_execute_query` 或 `dbx_execute_and_show`
+- Redis 命令：使用 DBX MCP 的 `dbx_execute_redis_command`
+
+注意：DBX 连接中的敏感凭据由本机 DBX 配置保存，不写入仓库。后端运行时连接串仍可通过 `.env` 中的 `DATABASE_URL` / `REDIS_URL` 覆盖。

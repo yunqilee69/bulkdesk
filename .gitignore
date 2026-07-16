@@ -1,0 +1,60 @@
+# === AI Tool Files ===
+docs/superpowers/**
+docs/specs/**
+.agents/
+.opencode/
+.claude/
+CLAUDE.md
+GEMINI.md
+AGENTS.md
+.sisyphus/
+
+# === Python (backend) ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+*.egg
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# === Node.js (frontend) ===
+**/node_modules/**
+.umi/
+.umi-production/
+.umi-test/
+.umi-undefined
+.turbopack/
+
+# === IDE & OS ===
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# === Logs ===
+*.log
+npm-debug.log*
+yarn-error.log
+
+# === Build Artifacts ===
+frontend/dist/
+frontend/build/
+frontend/screenshot/
+frontend/.wrangler/
+
+# === Coverage ===
+coverage/
+
+# === Misc ===
+.worktrees/
+.wrangler/
+.firebase/

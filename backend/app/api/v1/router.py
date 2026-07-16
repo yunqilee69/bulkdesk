@@ -1,0 +1,22 @@
+from fastapi import APIRouter
+
+from app.api.v1.auth import router as auth_router
+from app.api.v1.customer import router as customer_router
+from app.api.v1.dashboard import router as dashboard_router
+from app.api.v1.employee import router as employee_router
+from app.api.v1.inventory import router as inventory_router
+from app.api.v1.level import router as level_router
+from app.api.v1.order import router as order_router
+from app.api.v1.product import router as product_router
+from app.api.v1.upload import router as upload_router
+
+api_router = APIRouter(prefix="/api/v1")
+api_router.include_router(auth_router)
+api_router.include_router(dashboard_router)
+api_router.include_router(employee_router)
+api_router.include_router(customer_router)
+api_router.include_router(level_router)
+api_router.include_router(product_router)
+api_router.include_router(inventory_router)
+api_router.include_router(order_router)
+api_router.include_router(upload_router)
