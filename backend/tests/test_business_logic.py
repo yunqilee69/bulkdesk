@@ -24,7 +24,7 @@ from app.schemas.dashboard import DashboardStats
 from app.schemas.inventory import StockInRequest, TransferRequest, WarehouseCreate
 from app.schemas.customer import CustomerLevelCreate
 from app.schemas.order import OrderActionRequest, OrderCreate, OrderItemCreate, OrderOut
-from app.schemas.product import PriceChangeLogOut, ProductCreate
+from app.schemas.product import MemberPriceBatchItem, MemberPriceBatchUpdate, PriceChangeLogOut, ProductCreate, ProductUpdate
 from app.services import dashboard_service, employee_service, inventory_service, order_service, product_service
 from app.api.v1 import upload as upload_api
 from app.api.v1 import product as product_api
@@ -113,6 +113,27 @@ class CreateOrderDb(QueueDb):
         raise AssertionError(f"Unexpected query: {sql}")
 
 
+def test_member_price_batch_accepts_empty_reason():
+    request = MemberPriceBatchUpdate(
+        reason=None,
+        items=[MemberPriceBatchItem(level_id=str(uuid.uuid4()), price=88.5)],
+    )
+
+    assert request.reason is None
+
+
+def test_member_price_batch_rejects_duplicate_levels():
+    level_id = str(uuid.uuid4())
+
+    with pytest.raises(ValidationError, match="会员等级不能重复"):
+        MemberPriceBatchUpdate(
+            items=[
+                MemberPriceBatchItem(level_id=level_id, price=1),
+                MemberPriceBatchItem(level_id=level_id, price=2),
+            ]
+        )
+
+
 @pytest.mark.asyncio
 async def test_create_product_rejects_duplicate_barcode():
     request = ProductCreate(
@@ -130,6 +151,221 @@ async def test_create_product_rejects_duplicate_barcode():
         await product_service.create_product(db, request)
 
     assert db.added == []
+
+
+@pytest.mark.asyncio
+async def test_update_product_refreshes_database_generated_timestamps(monkeypatch):
+    product = Product(
+        id=uuid.uuid4(),
+        name="测试商品",
+        barcode="6900000000001",
+        category_id=uuid.uuid4(),
+        unit="件",
+        standard_price=Decimal("12.34"),
+        cost_price=Decimal("5.67"),
+    )
+    db = QueueDb([FakeResult(one=product)])
+    refreshed = []
+
+    async def refresh(instance, attribute_names=None):
+        refreshed.append((instance, attribute_names))
+
+    async def populate_product_out(_db, instance):
+        assert instance is product
+        return "updated-product"
+
+    db.refresh = refresh
+    monkeypatch.setattr(product_service, "_populate_product_out", populate_product_out)
+
+    result = await product_service.update_product(
+        db,
+        str(product.id),
+        ProductUpdate(name="更新后的商品"),
+    )
+
+    assert result == "updated-product"
+    assert product.name == "更新后的商品"
+    assert refreshed == [(product, None)]
+
+
+@pytest.mark.asyncio
+async def test_list_member_prices_returns_every_level_with_nullable_price():
+    product = Product(
+        id=uuid.uuid4(),
+        name="测试商品",
+        barcode="6900000000001",
+        category_id=uuid.uuid4(),
+        unit="件",
+        standard_price=Decimal("12.34"),
+        cost_price=Decimal("5.67"),
+    )
+    normal_level_id = uuid.uuid4()
+    gold_level_id = uuid.uuid4()
+    db = QueueDb(
+        [
+            FakeResult(one=product),
+            FakeResult(
+                values=[
+                    (normal_level_id, "普通会员", Decimal("88.50")),
+                    (gold_level_id, "黄金会员", None),
+                ]
+            ),
+        ]
+    )
+
+    rows = await product_service.list_member_prices(db, str(product.id))
+
+    assert [(row.level_id, row.level_name, row.price) for row in rows] == [
+        (str(normal_level_id), "普通会员", 88.5),
+        (str(gold_level_id), "黄金会员", None),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_batch_update_member_prices_creates_updates_and_logs_only_changes(monkeypatch):
+    product = Product(
+        id=uuid.uuid4(),
+        name="测试商品",
+        barcode="6900000000001",
+        category_id=uuid.uuid4(),
+        unit="件",
+        standard_price=Decimal("12.34"),
+        cost_price=Decimal("5.67"),
+    )
+    normal_level = CustomerLevel(id=uuid.uuid4(), name="普通会员", min_spent=Decimal("0"))
+    gold_level = CustomerLevel(id=uuid.uuid4(), name="黄金会员", min_spent=Decimal("1000"))
+    silver_level = CustomerLevel(id=uuid.uuid4(), name="白银会员", min_spent=Decimal("500"))
+    existing_price = MemberPrice(
+        id=uuid.uuid4(),
+        product_id=product.id,
+        level_id=normal_level.id,
+        price=Decimal("80.00"),
+    )
+    unchanged_price = MemberPrice(
+        id=uuid.uuid4(),
+        product_id=product.id,
+        level_id=silver_level.id,
+        price=Decimal("50.50"),
+    )
+    db = QueueDb(
+        [
+            FakeResult(one=product),
+            FakeResult(values=[normal_level, gold_level, silver_level]),
+            FakeResult(values=[existing_price, unchanged_price]),
+        ]
+    )
+
+    async def populate_product_out(_db, instance):
+        assert instance is product
+        return "updated-product"
+
+    monkeypatch.setattr(product_service, "_populate_product_out", populate_product_out)
+    result = await product_service.batch_update_member_prices(
+        db,
+        str(product.id),
+        MemberPriceBatchUpdate(
+            items=[
+                MemberPriceBatchItem(level_id=str(normal_level.id), price=90),
+                MemberPriceBatchItem(level_id=str(gold_level.id), price=70),
+                MemberPriceBatchItem(level_id=str(silver_level.id), price=50.5),
+            ]
+        ),
+        "admin",
+    )
+
+    added_prices = [item for item in db.added if isinstance(item, MemberPrice)]
+    logs = [item for item in db.added if isinstance(item, PriceChangeLog)]
+    assert result == "updated-product"
+    assert existing_price.price == 90
+    assert [(item.level_id, item.price) for item in added_prices] == [(str(gold_level.id), 70)]
+    assert [(item.level_id, item.old_value, item.new_value, item.reason) for item in logs] == [
+        (str(normal_level.id), 80, 90, ""),
+        (str(gold_level.id), None, 70, ""),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_batch_update_member_prices_validates_levels_before_writing():
+    product = Product(
+        id=uuid.uuid4(),
+        name="测试商品",
+        barcode="6900000000001",
+        category_id=uuid.uuid4(),
+        unit="件",
+        standard_price=Decimal("12.34"),
+        cost_price=Decimal("5.67"),
+    )
+    known_level = CustomerLevel(id=uuid.uuid4(), name="普通会员", min_spent=Decimal("0"))
+    db = QueueDb([FakeResult(one=product), FakeResult(values=[known_level])])
+
+    with pytest.raises(ValueError, match="会员等级不存在"):
+        await product_service.batch_update_member_prices(
+            db,
+            str(product.id),
+            MemberPriceBatchUpdate(
+                items=[
+                    MemberPriceBatchItem(level_id=str(known_level.id), price=90),
+                    MemberPriceBatchItem(level_id=str(uuid.uuid4()), price=70),
+                ]
+            ),
+            "admin",
+        )
+
+    assert db.added == []
+
+
+@pytest.mark.asyncio
+async def test_member_price_routes_delegate_to_services(monkeypatch):
+    product_id = str(uuid.uuid4())
+    request = MemberPriceBatchUpdate(
+        items=[MemberPriceBatchItem(level_id=str(uuid.uuid4()), price=88.5)]
+    )
+    expected_rows = [object()]
+    expected_product = object()
+    received = {}
+
+    async def list_prices(db, received_product_id):
+        received["list"] = (db, received_product_id)
+        return expected_rows
+
+    async def batch_update(db, received_product_id, received_request, operator_name):
+        received["batch"] = (db, received_product_id, received_request, operator_name)
+        return expected_product
+
+    monkeypatch.setattr(product_api.product_service, "list_member_prices", list_prices)
+    monkeypatch.setattr(product_api.product_service, "batch_update_member_prices", batch_update)
+    db = object()
+    admin = type("Admin", (), {"username": "admin"})()
+
+    listed = await product_api.list_member_prices(product_id, admin, db)
+    updated = await product_api.batch_member_prices(product_id, request, admin, db)
+
+    assert listed.data == expected_rows
+    assert updated.data == expected_product
+    assert received["list"] == (db, product_id)
+    assert received["batch"] == (db, product_id, request, "admin")
+
+
+@pytest.mark.asyncio
+async def test_list_price_change_logs_populates_member_level_name():
+    product_id = uuid.uuid4()
+    level_id = uuid.uuid4()
+    log = PriceChangeLog(
+        id=uuid.uuid4(),
+        product_id=product_id,
+        price_type="member_price",
+        level_id=level_id,
+        old_value=Decimal("80"),
+        new_value=Decimal("90"),
+        reason="调价",
+        created_at=datetime.now(timezone.utc),
+    )
+    db = QueueDb([FakeResult(scalar=1), FakeResult(values=[(log, "黄金会员")])])
+
+    result = await product_service.list_price_change_logs(db, str(product_id))
+
+    assert result.total == 1
+    assert result.items[0].level_name == "黄金会员"
 
 
 @pytest.mark.asyncio

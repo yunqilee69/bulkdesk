@@ -8,7 +8,7 @@ from app.core.database import get_db
 from app.core.deps import AdminUser, CurrentUser
 from app.models.product import PriceType, ProductStatus
 from app.schemas.common import PaginatedResponse, ResponseBase
-from app.schemas.product import BrandCreate, BrandOut, BrandUpdate, CategoryCreate, CategoryOut, CategoryUpdate, PriceChangeLogOut, PriceChangeRequest, ProductCreate, ProductOut, ProductUpdate
+from app.schemas.product import BrandCreate, BrandOut, BrandUpdate, CategoryCreate, CategoryOut, CategoryUpdate, MemberPriceBatchUpdate, MemberPriceItemOut, PriceChangeLogOut, PriceChangeRequest, ProductCreate, ProductOut, ProductUpdate
 from app.services import product_service
 
 router = APIRouter(prefix="/products", tags=["Product"])
@@ -57,6 +57,14 @@ async def standard_price(product_id: str, req: PriceChangeRequest, admin: AdminU
 @router.put("/{product_id}/cost-price", response_model=ResponseBase[ProductOut])
 async def cost_price(product_id: str, req: PriceChangeRequest, admin: AdminUser, db: AsyncSession = Depends(get_db)):
     try: return ResponseBase(data=await product_service.change_price(db, product_id, PriceType.cost_price, req, admin.username))
+    except ValueError as error: _bad(error)
+@router.get("/{product_id}/member-prices", response_model=ResponseBase[list[MemberPriceItemOut]])
+async def list_member_prices(product_id: str, admin: AdminUser, db: AsyncSession = Depends(get_db)):
+    try: return ResponseBase(data=await product_service.list_member_prices(db, product_id))
+    except ValueError as error: _bad(error)
+@router.put("/{product_id}/member-prices", response_model=ResponseBase[ProductOut])
+async def batch_member_prices(product_id: str, req: MemberPriceBatchUpdate, admin: AdminUser, db: AsyncSession = Depends(get_db)):
+    try: return ResponseBase(data=await product_service.batch_update_member_prices(db, product_id, req, admin.username))
     except ValueError as error: _bad(error)
 @router.put("/{product_id}/member-prices/{level_id}", response_model=ResponseBase[ProductOut])
 async def member_price(product_id: str, level_id: str, req: PriceChangeRequest, admin: AdminUser, db: AsyncSession = Depends(get_db)):

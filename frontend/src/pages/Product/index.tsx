@@ -8,27 +8,35 @@ import {
   ProTable,
 } from '@ant-design/pro-components';
 import type { ActionType, ProColumns } from '@ant-design/pro-components';
+import { Line } from '@ant-design/charts';
 import { PlusOutlined } from '@ant-design/icons';
-import { Button, Drawer, Input, InputNumber, message, Row, Col, Select, Space, Upload } from 'antd';
+import { Button, Empty, Image, Input, InputNumber, message, Modal, Row, Col, Space, Table, Tag, Upload } from 'antd';
 import type { UploadFile, UploadProps } from 'antd';
 import { useAccess } from '@umijs/max';
 import { useEffect, useRef, useState } from 'react';
 import {
-  changeMemberPrice,
+  batchUpdateMemberPrices,
   changeProductPrice,
   createProduct,
   listAllBrands,
   listAllCategories,
+  listMemberPrices,
+  listPriceChangeLogs,
   listProducts,
   updateProduct,
 } from '@/services/product';
-import { listAllLevels } from '@/services/customer';
 import { uploadFile } from '@/services/upload';
 import {
   extractUploadedImageUrls,
+  findProductImagePreviewIndex,
+  getProductImagePreviewUrl,
   MAX_PRODUCT_IMAGES,
   validateProductImage,
 } from './form';
+import { getChangedMemberPriceItems, getMemberPriceChangeState } from './memberPrices';
+import type { MemberPriceRow } from './memberPrices';
+import { toPriceChartData } from './priceChart';
+import type { PriceChartPoint } from './priceChart';
 
 type ProductRecord = {
   id: string;
@@ -83,19 +91,19 @@ export default function ProductList() {
   const actionRef = useRef<ActionType>(null);
   const [categories, setCategories] = useState<Option[]>([]);
   const [brands, setBrands] = useState<Option[]>([]);
-  const [levels, setLevels] = useState<Option[]>([]);
   const [editing, setEditing] = useState<ProductRecord>();
   const [open, setOpen] = useState(false);
   const [imageFileList, setImageFileList] = useState<ProductImageFile[]>([]);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewItems, setPreviewItems] = useState<string[]>([]);
   const [priceProduct, setPriceProduct] = useState<ProductRecord>();
   const [priceOpen, setPriceOpen] = useState(false);
 
   useEffect(() => {
-    Promise.all([listAllCategories(), listAllBrands(), listAllLevels()])
-      .then(([categoryItems, brandItems, levelItems]) => {
+    Promise.all([listAllCategories(), listAllBrands()])
+      .then(([categoryItems, brandItems]) => {
         setCategories(categoryItems as Option[]);
         setBrands(brandItems as Option[]);
-        setLevels(levelItems as Option[]);
       })
       .catch(() => message.error('基础数据加载失败'));
   }, []);
@@ -149,6 +157,26 @@ export default function ProductList() {
           : [],
     },
   ];
+
+  const availablePreviewImageUrls = imageFileList
+    .map(getProductImagePreviewUrl)
+    .filter((url): url is string => Boolean(url));
+
+  const handleProductImagePreview: NonNullable<UploadProps['onPreview']> = (file) => {
+    const productImage = file as ProductImageFile;
+    const previewUrl = getProductImagePreviewUrl(productImage);
+    if (!previewUrl) {
+      message.warning('图片尚未上传完成，暂时无法预览');
+      return;
+    }
+    const current = findProductImagePreviewIndex(imageFileList, productImage);
+    if (current < 0) return;
+    setPreviewItems([
+      ...availablePreviewImageUrls.slice(current),
+      ...availablePreviewImageUrls.slice(0, current),
+    ]);
+    setPreviewOpen(true);
+  };
 
   const productFields = (
     <>
@@ -233,7 +261,11 @@ export default function ProductList() {
           listType="picture-card"
           maxCount={MAX_PRODUCT_IMAGES}
           multiple
-          onChange={({ fileList }) => setImageFileList(fileList)}
+          onChange={({ file, fileList }) => {
+            if (file.status === 'done' && file.response?.url) file.url = file.response.url;
+            setImageFileList(fileList as ProductImageFile[]);
+          }}
+          onPreview={handleProductImagePreview}
         >
           {imageFileList.length < MAX_PRODUCT_IMAGES && (
             <div>
@@ -242,6 +274,13 @@ export default function ProductList() {
             </div>
           )}
         </Upload>
+        <Image.PreviewGroup
+          items={previewItems}
+          preview={{
+            visible: previewOpen,
+            onOpenChange: (visible) => setPreviewOpen(visible),
+          }}
+        />
       </ProForm.Item>
       <ProFormTextArea name="description" label="描述" fieldProps={{ rows: 3 }} />
     </>
@@ -307,7 +346,11 @@ export default function ProductList() {
         }}
         onOpenChange={(nextOpen) => {
           setOpen(nextOpen);
-          if (!nextOpen) setImageFileList([]);
+          if (!nextOpen) {
+            setImageFileList([]);
+            setPreviewOpen(false);
+            setPreviewItems([]);
+          }
         }}
         open={open}
         title={editing ? '编辑商品' : '新建商品'}
@@ -315,52 +358,107 @@ export default function ProductList() {
       >
         {productFields}
       </ModalForm>
-      <Drawer
+      <Modal
+        centered
+        destroyOnHidden
+        footer={null}
         open={priceOpen}
         title={`价格管理 - ${priceProduct?.name ?? ''}`}
-        width={440}
-        onClose={() => setPriceOpen(false)}
+        width={760}
+        onCancel={() => setPriceOpen(false)}
       >
-        {priceProduct && <PriceEditor levels={levels} product={priceProduct} onSaved={() => actionRef.current?.reload()} />}
-      </Drawer>
+        {priceProduct && <PriceEditor product={priceProduct} onSaved={() => actionRef.current?.reload()} />}
+      </Modal>
     </PageContainer>
   );
 }
 
-function PriceEditor({ product, levels, onSaved }: { product: ProductRecord; levels: Option[]; onSaved: () => void }) {
+function PriceEditor({ product, onSaved }: { product: ProductRecord; onSaved: () => void }) {
   const [standard, setStandard] = useState(product.standard_price);
   const [cost, setCost] = useState(product.cost_price);
-  const [memberLevel, setMemberLevel] = useState<string>();
-  const [memberPrice, setMemberPrice] = useState<number>();
+  const [memberPriceRows, setMemberPriceRows] = useState<MemberPriceRow[]>([]);
+  const [memberPricesLoading, setMemberPricesLoading] = useState(false);
+  const [memberPricesSaving, setMemberPricesSaving] = useState(false);
+  const [priceChartData, setPriceChartData] = useState<PriceChartPoint[]>([]);
   const [reason, setReason] = useState('');
+
+  const loadMemberPrices = async () => {
+    setMemberPricesLoading(true);
+    try {
+      const response = await listMemberPrices(product.id);
+      if (response.code !== 0) {
+        message.error(response.message || '会员价加载失败');
+        return;
+      }
+      setMemberPriceRows(
+        (response.data ?? []).map((item) => ({
+          ...item,
+          draftPrice: item.price ?? undefined,
+        })),
+      );
+    } finally {
+      setMemberPricesLoading(false);
+    }
+  };
+
+  const loadPriceChart = async () => {
+    const response = await listPriceChangeLogs({ product_id: product.id, page: 1, page_size: 100 });
+    if (response.code !== 0) {
+      message.error(response.message || '价格变动加载失败');
+      return;
+    }
+    setPriceChartData(toPriceChartData(response.data?.items ?? []));
+  };
 
   useEffect(() => {
     setStandard(product.standard_price);
     setCost(product.cost_price);
-    setMemberLevel(undefined);
-    setMemberPrice(undefined);
     setReason('');
+    void loadMemberPrices();
+    void loadPriceChart();
   }, [product]);
 
-  const submit = async (kind: 'standard_price' | 'cost_price' | 'member_price') => {
+  const submit = async (kind: 'standard_price' | 'cost_price') => {
     if (!reason.trim()) return message.warning('请填写调整原因');
-    const price = kind === 'standard_price' ? standard : kind === 'cost_price' ? cost : memberPrice;
+    const price = kind === 'standard_price' ? standard : cost;
     if (price === undefined || price < 0) return message.warning('请输入有效价格');
-    const response =
-      kind === 'member_price'
-        ? memberLevel
-          ? await changeMemberPrice(product.id, memberLevel, { price, reason })
-          : undefined
-        : await changeProductPrice(product.id, kind, { price, reason });
-    if (!response) return message.warning('请选择会员等级');
+    const response = await changeProductPrice(product.id, kind, { price, reason });
     if (response.code === 0) {
       message.success('价格已调整');
       setReason('');
+      await loadPriceChart();
       onSaved();
       return;
     }
     message.error(response.message || '调整失败');
     return;
+  };
+
+  const changedMemberPrices = getChangedMemberPriceItems(memberPriceRows);
+
+  const saveMemberPrices = async () => {
+    if (!changedMemberPrices.length) {
+      message.warning('请先修改或新增会员价');
+      return;
+    }
+    setMemberPricesSaving(true);
+    try {
+      const response = await batchUpdateMemberPrices(product.id, {
+        items: changedMemberPrices,
+        ...(reason.trim() ? { reason: reason.trim() } : {}),
+      });
+      if (response.code !== 0) {
+        message.error(response.message || '会员价保存失败');
+        return;
+      }
+      message.success('会员价已保存');
+      setReason('');
+      await loadMemberPrices();
+      await loadPriceChart();
+      onSaved();
+    } finally {
+      setMemberPricesSaving(false);
+    }
   };
 
   return (
@@ -395,29 +493,60 @@ function PriceEditor({ product, levels, onSaved }: { product: ProductRecord; lev
           保存
         </Button>
       </Space.Compact>
-      <span>会员等级与会员价</span>
-      <Select
-        placeholder="选择会员等级"
-        value={memberLevel}
-        options={levels.map((item) => ({ label: item.name, value: item.id }))}
-        onChange={setMemberLevel}
+      <span>会员价格</span>
+      <Table<MemberPriceRow>
+        dataSource={memberPriceRows}
+        loading={memberPricesLoading}
+        pagination={false}
+        rowKey="level_id"
+        size="small"
+        columns={[
+          { title: '会员等级', dataIndex: 'level_name' },
+          {
+            title: '当前价格',
+            render: (_, row) => (row.price === undefined || row.price === null ? '未设置' : `¥${row.price.toFixed(2)}`),
+          },
+          {
+            title: '新价格',
+            render: (_, row) => (
+              <InputNumber
+                min={0}
+                precision={2}
+                prefix="¥"
+                suffix="元"
+                value={row.draftPrice}
+                onChange={(value) => setMemberPriceRows((rows) => rows.map((item) => (item.level_id === row.level_id ? { ...item, draftPrice: value ?? undefined } : item)))}
+              />
+            ),
+          },
+          {
+            title: '状态',
+            render: (_, row) => {
+              const state = getMemberPriceChangeState(row);
+              return <Tag color={state === '未变更' ? 'default' : state === '新增' ? 'green' : 'blue'}>{state}</Tag>;
+            },
+          },
+        ]}
       />
-      <Space.Compact style={{ width: '100%' }}>
-        <InputNumber
-          min={0}
-          precision={2}
-          prefix="¥"
-          suffix="元"
-          placeholder="会员价"
-          style={{ width: '100%' }}
-          value={memberPrice}
-          onChange={(value) => setMemberPrice(value ?? undefined)}
+      <Input placeholder="调整原因（可选）" value={reason} onChange={(event) => setReason(event.target.value)} />
+      <Button disabled={!changedMemberPrices.length} loading={memberPricesSaving} type="primary" onClick={saveMemberPrices}>
+        保存会员价
+      </Button>
+      <span>价格变动趋势</span>
+      {priceChartData.length ? (
+        <Line
+          data={priceChartData}
+          xField="changedAt"
+          yField="price"
+          colorField="series"
+          height={280}
+          axis={{ y: { title: '价格（元）' } }}
+          legend={{ color: { position: 'top' } }}
+          tooltip={{ title: 'changedAt' }}
         />
-        <Button type="primary" onClick={() => submit('member_price')}>
-          保存
-        </Button>
-      </Space.Compact>
-      <Input placeholder="调整原因" value={reason} onChange={(event) => setReason(event.target.value)} />
+      ) : (
+        <Empty description="暂无价格变动记录" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+      )}
     </Space>
   );
 }

@@ -21,3 +21,7 @@ def test_price_change_log_is_product_scoped():
     assert hasattr(PriceChangeLog, "price_type")
     assert hasattr(PriceChangeLog, "level_id")
     assert hasattr(PriceChangeLog, "operator_name")
+
+
+def test_price_change_log_uses_non_native_enum_for_varchar_column():
+    assert PriceChangeLog.__table__.c.price_type.type.native_enum is False

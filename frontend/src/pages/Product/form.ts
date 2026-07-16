@@ -19,3 +19,20 @@ export function extractUploadedImageUrls(fileList: UploadFile<UploadedImageRespo
     file.status === 'done' && file.response?.url ? [file.response.url] : [],
   );
 }
+
+export function getProductImagePreviewUrl(file: UploadFile<UploadedImageResponse>) {
+  if (file.status !== 'done') return undefined;
+  return file.response?.url ?? file.url;
+}
+
+export function findProductImagePreviewIndex(
+  fileList: UploadFile<UploadedImageResponse>[],
+  file: UploadFile<UploadedImageResponse>,
+) {
+  const previewUrl = getProductImagePreviewUrl(file);
+  if (!previewUrl) return -1;
+  return fileList
+    .map(getProductImagePreviewUrl)
+    .filter((url): url is string => Boolean(url))
+    .indexOf(previewUrl);
+}

@@ -103,7 +103,7 @@ exec_new_session() {
 run_backend_service() {
   cd "$BACKEND_DIR" || exit 1
   PYTHONUNBUFFERED=1 exec_new_session \
-    uv run uvicorn app.main:app --reload --host 0.0.0.0 --port "$BACKEND_PORT"
+    uv run python -m uvicorn app.main:app --reload --host 0.0.0.0 --port "$BACKEND_PORT"
 }
 
 run_frontend_service() {
@@ -133,6 +133,15 @@ start_service() {
   wait "$logger_pid" >/dev/null 2>&1 || true
   rm -f "$fifo" "$service_pid_file"
   return "$service_status"
+}
+
+capture_service_pids() {
+  if [[ -z "$BACKEND_PID" && -f "$RUNTIME_DIR/backend.pid" ]]; then
+    BACKEND_PID=$(cat "$RUNTIME_DIR/backend.pid")
+  fi
+  if [[ -z "$FRONTEND_PID" && -f "$RUNTIME_DIR/frontend.pid" ]]; then
+    FRONTEND_PID=$(cat "$RUNTIME_DIR/frontend.pid")
+  fi
 }
 
 terminate_group() {
@@ -199,17 +208,19 @@ start_service frontend "$FRONTEND_LOG" run_frontend_service &
 FRONTEND_JOB_PID=$!
 
 for _ in $(seq 1 50); do
+  capture_service_pids
   [[ -f "$RUNTIME_DIR/backend.pid" && -f "$RUNTIME_DIR/frontend.pid" ]] && break
   sleep 0.1
 done
 
 [[ -f "$RUNTIME_DIR/backend.pid" && -f "$RUNTIME_DIR/frontend.pid" ]] || {
   write_system_line "ERROR: failed to start service processes"
+  capture_service_pids
+  stop_services
   exit 1
 }
 
-BACKEND_PID=$(cat "$RUNTIME_DIR/backend.pid")
-FRONTEND_PID=$(cat "$RUNTIME_DIR/frontend.pid")
+capture_service_pids
 
 write_system_line "backend starting at http://localhost:$BACKEND_PORT (PID $BACKEND_PID)"
 write_system_line "frontend starting at http://localhost:$FRONTEND_PORT (PID $FRONTEND_PID)"

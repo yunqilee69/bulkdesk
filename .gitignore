@@ -1,6 +1,4 @@
 # === AI Tool Files ===
-docs/superpowers/**
-docs/specs/**
 .agents/
 .opencode/
 .claude/

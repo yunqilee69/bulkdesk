@@ -2,7 +2,13 @@ import { Upload } from 'antd';
 import type { UploadFile } from 'antd';
 import { describe, expect, it } from 'vitest';
 
-import { extractUploadedImageUrls, MAX_PRODUCT_IMAGES, validateProductImage } from './form';
+import {
+  extractUploadedImageUrls,
+  findProductImagePreviewIndex,
+  getProductImagePreviewUrl,
+  MAX_PRODUCT_IMAGES,
+  validateProductImage,
+} from './form';
 
 function imageFile(
   status: UploadFile<{ url?: string }>['status'],
@@ -41,5 +47,24 @@ describe('product form helpers', () => {
 
   it('limits product images to nine files', () => {
     expect(MAX_PRODUCT_IMAGES).toBe(9);
+  });
+
+  it('uses completed upload URLs for previews', () => {
+    expect(getProductImagePreviewUrl(imageFile('done', { url: 'https://example.com/a.png' }))).toBe(
+      'https://example.com/a.png',
+    );
+    const existingImage = imageFile('done');
+    existingImage.url = 'https://example.com/existing.png';
+    expect(getProductImagePreviewUrl(existingImage)).toBe('https://example.com/existing.png');
+    expect(getProductImagePreviewUrl(imageFile('uploading', { url: 'https://example.com/a.png' }))).toBeUndefined();
+  });
+
+  it('finds the clicked image in the preview list', () => {
+    const files = [
+      imageFile('done', { url: 'https://example.com/a.png' }),
+      imageFile('done', { url: 'https://example.com/b.png' }),
+    ];
+
+    expect(findProductImagePreviewIndex(files, files[1])).toBe(1);
   });
 });

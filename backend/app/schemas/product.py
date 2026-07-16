@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.models.product import BrandStatus, CategoryStatus, PriceType, ProductStatus
 
@@ -115,6 +115,28 @@ class PriceChangeRequest(BaseModel):
 
 class MemberPriceRequest(PriceChangeRequest):
     pass
+
+
+class MemberPriceItemOut(BaseModel):
+    level_id: str
+    level_name: str
+    price: Optional[float] = None
+
+
+class MemberPriceBatchItem(BaseModel):
+    level_id: str
+    price: float = Field(..., ge=0)
+
+
+class MemberPriceBatchUpdate(BaseModel):
+    reason: Optional[str] = Field(None, max_length=255)
+    items: list[MemberPriceBatchItem] = Field(..., min_length=1)
+
+    @model_validator(mode="after")
+    def unique_levels(self):
+        if len({item.level_id for item in self.items}) != len(self.items):
+            raise ValueError("会员等级不能重复")
+        return self
 
 
 class PriceChangeLogOut(BaseModel):

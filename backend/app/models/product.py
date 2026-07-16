@@ -101,7 +101,7 @@ class PriceChangeLog(UUIDMixin, Base):
         ForeignKey("products.id"), nullable=False
     )
     price_type: Mapped[PriceType] = mapped_column(
-        Enum(PriceType, name="price_type", native_enum=True),
+        Enum(PriceType, name="price_type", native_enum=False),
         nullable=False,
     )
     level_id: Mapped[Optional[uuid.UUID]] = mapped_column(

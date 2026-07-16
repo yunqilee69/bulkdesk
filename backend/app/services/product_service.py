@@ -1,6 +1,6 @@
 from typing import Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.customer import CustomerLevel, MemberPrice
@@ -8,7 +8,8 @@ from app.models.product import Brand, Category, PriceChangeLog, PriceType, Produ
 from app.schemas.common import PaginatedResponse
 from app.schemas.product import (
     BrandCreate, BrandOut, BrandUpdate, CategoryCreate, CategoryOut, CategoryUpdate,
-    PriceChangeLogOut, PriceChangeRequest, ProductCreate, ProductOut, ProductUpdate,
+    MemberPriceBatchUpdate, MemberPriceItemOut, PriceChangeLogOut, PriceChangeRequest,
+    ProductCreate, ProductOut, ProductUpdate,
 )
 
 
@@ -70,7 +71,73 @@ async def update_product(db: AsyncSession, product_id: str, req: ProductUpdate):
     product = await _require_product(db, product_id)
     if req.category_id and not (await db.execute(select(Category.id).where(Category.id == req.category_id))).scalar_one_or_none(): raise ValueError("分类不存在")
     for field, value in req.model_dump(exclude_unset=True).items(): setattr(product, field, value)
-    await db.flush(); return await _populate_product_out(db, product)
+    await db.flush(); await db.refresh(product); return await _populate_product_out(db, product)
+
+
+async def list_member_prices(db: AsyncSession, product_id: str):
+    await _require_product(db, product_id)
+    rows = await db.execute(
+        select(CustomerLevel.id, CustomerLevel.name, MemberPrice.price)
+        .outerjoin(
+            MemberPrice,
+            and_(
+                MemberPrice.level_id == CustomerLevel.id,
+                MemberPrice.product_id == product_id,
+            ),
+        )
+        .order_by(CustomerLevel.sort_order, CustomerLevel.created_at)
+    )
+    return [
+        MemberPriceItemOut(level_id=str(level_id), level_name=level_name, price=price)
+        for level_id, level_name, price in rows.all()
+    ]
+
+
+async def batch_update_member_prices(
+    db: AsyncSession,
+    product_id: str,
+    req: MemberPriceBatchUpdate,
+    operator_name: Optional[str] = None,
+):
+    product = await _require_product(db, product_id)
+    level_ids = [item.level_id for item in req.items]
+    levels = (
+        await db.execute(select(CustomerLevel).where(CustomerLevel.id.in_(level_ids)))
+    ).scalars().all()
+    if {str(level.id) for level in levels} != set(level_ids):
+        raise ValueError("会员等级不存在")
+    existing_prices = (
+        await db.execute(
+            select(MemberPrice).where(
+                MemberPrice.product_id == product.id,
+                MemberPrice.level_id.in_(level_ids),
+            )
+        )
+    ).scalars().all()
+    prices_by_level_id = {str(member_price.level_id): member_price for member_price in existing_prices}
+
+    for item in req.items:
+        member_price = prices_by_level_id.get(item.level_id)
+        old_value = member_price.price if member_price else None
+        if old_value == item.price:
+            continue
+        if member_price:
+            member_price.price = item.price
+        else:
+            db.add(MemberPrice(product_id=product.id, level_id=item.level_id, price=item.price))
+        db.add(
+            PriceChangeLog(
+                product_id=product.id,
+                price_type=PriceType.member_price,
+                level_id=item.level_id,
+                old_value=old_value,
+                new_value=item.price,
+                reason=req.reason or "",
+                operator_name=operator_name,
+            )
+        )
+    await db.flush()
+    return await _populate_product_out(db, product)
 
 async def change_price(db: AsyncSession, product_id: str, price_type: PriceType, req: PriceChangeRequest, operator_name: Optional[str] = None, level_id: Optional[str] = None):
     product = await _require_product(db, product_id)
@@ -86,7 +153,13 @@ async def change_price(db: AsyncSession, product_id: str, price_type: PriceType,
     db.add(PriceChangeLog(product_id=product.id, price_type=price_type, level_id=level_id, old_value=old_value, new_value=req.price, reason=req.reason, operator_name=operator_name)); await db.flush(); return await _populate_product_out(db, product)
 
 async def list_price_change_logs(db: AsyncSession, product_id: Optional[str] = None, page=1, page_size=20):
-    query = select(PriceChangeLog); count = select(func.count()).select_from(PriceChangeLog)
+    query = select(PriceChangeLog, CustomerLevel.name); count = select(func.count()).select_from(PriceChangeLog)
+    query = query.outerjoin(CustomerLevel, CustomerLevel.id == PriceChangeLog.level_id)
     if product_id: query, count = query.where(PriceChangeLog.product_id == product_id), count.where(PriceChangeLog.product_id == product_id)
-    total = (await db.execute(count)).scalar() or 0; logs = (await db.execute(query.order_by(PriceChangeLog.created_at.desc()).offset((page-1)*page_size).limit(page_size))).scalars().all()
-    return PaginatedResponse(items=[PriceChangeLogOut.model_validate(log) for log in logs], total=total, page=page, page_size=page_size)
+    total = (await db.execute(count)).scalar() or 0; rows = (await db.execute(query.order_by(PriceChangeLog.created_at.desc()).offset((page-1)*page_size).limit(page_size))).all()
+    items = []
+    for log, level_name in rows:
+        item = PriceChangeLogOut.model_validate(log)
+        item.level_name = level_name
+        items.append(item)
+    return PaginatedResponse(items=items, total=total, page=page, page_size=page_size)

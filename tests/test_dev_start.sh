@@ -214,7 +214,67 @@ EOF
   printf 'PASS: rejects unsupported Node.js before starting services\n'
 }
 
+test_starts_uvicorn_as_a_python_module() {
+  local fixture="$TEMP_ROOT/python-module"
+  local status=0
+
+  create_fixture "$fixture"
+  mkdir -p "$fixture/state"
+
+  cat > "$fixture/bin/uv" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "$TEST_STATE/uv-arguments"
+printf 'backend-ready\n'
+sleep 1
+exit 7
+EOF
+
+  chmod +x "$fixture/bin/uv"
+  TEST_STATE="$fixture/state" PATH="$fixture/bin:$PATH" "$fixture/dev.sh" > "$fixture/terminal.log" 2>&1 || status=$?
+
+  [[ "$status" -ne 0 ]] || fail "launcher should report an abnormal fake service exit"
+  assert_matches '^run python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 9000$' \
+    "$fixture/state/uv-arguments"
+
+  printf 'PASS: starts Uvicorn as a Python module\n'
+}
+
+test_stops_frontend_when_backend_exits_before_startup() {
+  local fixture="$TEMP_ROOT/early-backend-exit"
+  local status=0
+  local frontend_pid
+
+  create_fixture "$fixture"
+  mkdir -p "$fixture/state"
+
+  cat > "$fixture/bin/uv" <<'EOF'
+#!/usr/bin/env bash
+printf 'backend-failed\n'
+exit 7
+EOF
+
+  cat > "$fixture/bin/npm" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$TEST_STATE/frontend.pid"
+printf 'frontend-waiting\n'
+trap 'exit 0' TERM INT
+while :; do sleep 1; done
+EOF
+
+  chmod +x "$fixture/bin/uv" "$fixture/bin/npm"
+  TEST_STATE="$fixture/state" PATH="$fixture/bin:$PATH" "$fixture/dev.sh" > "$fixture/terminal.log" 2>&1 || status=$?
+
+  [[ "$status" -ne 0 ]] || fail "launcher should report the backend startup failure"
+  wait_for_file "$fixture/state/frontend.pid"
+  frontend_pid=$(cat "$fixture/state/frontend.pid")
+  ! kill -0 "$frontend_pid" 2>/dev/null || fail "frontend process survived backend startup failure"
+
+  printf 'PASS: stops frontend when backend exits before startup\n'
+}
+
 test_writes_prefixed_daily_service_logs
 test_uses_bulkdesk_runtime_directory
 test_stops_both_service_groups_on_term
 test_rejects_unsupported_node_before_starting_services
+test_starts_uvicorn_as_a_python_module
+test_stops_frontend_when_backend_exits_before_startup
