@@ -1,10 +1,8 @@
 # === AI Tool Files ===
-.agents/
 .opencode/
 .claude/
 CLAUDE.md
 GEMINI.md
-AGENTS.md
 .sisyphus/
 
 # === Python (backend) ===

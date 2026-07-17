@@ -1,10 +1,11 @@
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import Field, field_validator
 
+from app.schemas.common import ApiSchema
 
-class CustomerCreate(BaseModel):
+class CustomerCreate(ApiSchema):
     name: str = Field(..., min_length=1, max_length=100)
     contact_name: str = Field(..., min_length=1, max_length=50)
     contact_phone: str = Field(..., min_length=1, max_length=20)
@@ -14,7 +15,7 @@ class CustomerCreate(BaseModel):
     image_urls: Optional[List[str]] = None
 
 
-class CustomerUpdate(BaseModel):
+class CustomerUpdate(ApiSchema):
     name: Optional[str] = Field(None, max_length=100)
     contact_name: Optional[str] = Field(None, max_length=50)
     contact_phone: Optional[str] = None
@@ -24,7 +25,7 @@ class CustomerUpdate(BaseModel):
     image_urls: Optional[List[str]] = None
 
 
-class CustomerOut(BaseModel):
+class CustomerOut(ApiSchema):
     id: str
     name: str
     contact_name: str
@@ -48,21 +49,21 @@ class CustomerOut(BaseModel):
         return str(v)
 
 
-class CustomerLevelCreate(BaseModel):
+class CustomerLevelCreate(ApiSchema):
     name: str = Field(..., min_length=1, max_length=50)
     min_spent: float = Field(0, ge=0)
     sort_order: int = Field(0)
     is_default: bool = Field(False)
 
 
-class CustomerLevelUpdate(BaseModel):
+class CustomerLevelUpdate(ApiSchema):
     name: Optional[str] = Field(None, max_length=50)
     min_spent: Optional[float] = Field(None, ge=0)
     sort_order: Optional[int] = None
     is_default: Optional[bool] = None
 
 
-class CustomerLevelOut(BaseModel):
+class CustomerLevelOut(ApiSchema):
     id: str
     name: str
     min_spent: float
@@ -78,17 +79,17 @@ class CustomerLevelOut(BaseModel):
         return str(v)
 
 
-class MemberPriceCreate(BaseModel):
+class MemberPriceCreate(ApiSchema):
     product_id: str
     level_id: str
     price: float = Field(..., ge=0)
 
 
-class MemberPriceUpdate(BaseModel):
+class MemberPriceUpdate(ApiSchema):
     price: float = Field(..., ge=0)
 
 
-class MemberPriceOut(BaseModel):
+class MemberPriceOut(ApiSchema):
     id: str
     product_id: str
     level_id: str

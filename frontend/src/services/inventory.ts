@@ -10,6 +10,7 @@ export interface InventoryItem {
   warning_quantity: number;
   available_quantity?: number;
   product_info?: string;
+  product_image_url?: string;
   warehouse_name?: string;
   supplier_id?: string;
   supplier_name?: string;

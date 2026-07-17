@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import {
   extractUploadedImageUrls,
   findProductImagePreviewIndex,
+  getProductListImageUrl,
   getProductImagePreviewUrl,
   MAX_PRODUCT_IMAGES,
   validateProductImage,
@@ -66,5 +67,15 @@ describe('product form helpers', () => {
     ];
 
     expect(findProductImagePreviewIndex(files, files[1])).toBe(1);
+  });
+
+  it('uses only the first product image for list thumbnails', () => {
+    expect(
+      getProductListImageUrl([
+        'https://example.com/first.png',
+        'https://example.com/second.png',
+      ]),
+    ).toBe('https://example.com/first.png');
+    expect(getProductListImageUrl()).toBeUndefined();
   });
 });

@@ -1,12 +1,13 @@
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import Field, field_validator
 
 from app.models.inventory import MovementType, SupplierStatus, WarehouseStatus
+from app.schemas.common import ApiSchema
 
 
-class WarehouseCreate(BaseModel):
+class WarehouseCreate(ApiSchema):
     name: str = Field(..., min_length=1, max_length=100)
     address: Optional[str] = None
     remark: Optional[str] = None
@@ -16,7 +17,7 @@ class WarehouseCreate(BaseModel):
     status: Optional[WarehouseStatus] = WarehouseStatus.active
 
 
-class WarehouseUpdate(BaseModel):
+class WarehouseUpdate(ApiSchema):
     name: Optional[str] = Field(None, max_length=100)
     address: Optional[str] = None
     remark: Optional[str] = None
@@ -26,7 +27,7 @@ class WarehouseUpdate(BaseModel):
     status: Optional[WarehouseStatus] = None
 
 
-class WarehouseOut(BaseModel):
+class WarehouseOut(ApiSchema):
     id: str
     name: str
     address: Optional[str]
@@ -46,13 +47,12 @@ class WarehouseOut(BaseModel):
         return str(v)
 
 
-class InventoryOut(BaseModel):
+class InventoryOut(ApiSchema):
     id: str
     product_id: str
     warehouse_id: str
     quantity: int
     locked: int
-    warning_quantity: int = 0
     supplier_id: Optional[str] = None
     production_date: Optional[str] = None
     expiry_date: Optional[str] = None
@@ -69,45 +69,45 @@ class InventoryOut(BaseModel):
         return str(v) if v is not None else None
 
 
-class StockInRequest(BaseModel):
+class StockInRequest(ApiSchema):
     product_id: str
     warehouse_id: str
     quantity: int = Field(..., gt=0)
     remark: Optional[str] = None
 
 
-class BatchStockInItem(BaseModel):
+class BatchStockInItem(ApiSchema):
     product_id: str
     quantity: int = Field(..., gt=0)
     cost_price: Optional[float] = Field(None, ge=0)
 
 
-class BatchStockInRequest(BaseModel):
+class BatchStockInRequest(ApiSchema):
     warehouse_id: str
     supplier_id: Optional[str] = None
     items: List[BatchStockInItem] = Field(..., min_length=1)
     remark: Optional[str] = None
 
 
-class StockOutRequest(BaseModel):
+class StockOutRequest(ApiSchema):
     product_id: str
     warehouse_id: str
     quantity: int = Field(..., gt=0)
     remark: Optional[str] = None
 
 
-class BatchStockOutItem(BaseModel):
+class BatchStockOutItem(ApiSchema):
     product_id: str
     quantity: int = Field(..., gt=0)
 
 
-class BatchStockOutRequest(BaseModel):
+class BatchStockOutRequest(ApiSchema):
     warehouse_id: str
     items: List[BatchStockOutItem] = Field(..., min_length=1)
     remark: Optional[str] = None
 
 
-class TransferRequest(BaseModel):
+class TransferRequest(ApiSchema):
     product_id: str
     from_warehouse_id: str
     to_warehouse_id: str
@@ -115,37 +115,37 @@ class TransferRequest(BaseModel):
     remark: Optional[str] = None
 
 
-class BatchTransferItem(BaseModel):
+class BatchTransferItem(ApiSchema):
     product_id: str
     quantity: int = Field(..., gt=0)
 
 
-class BatchTransferRequest(BaseModel):
+class BatchTransferRequest(ApiSchema):
     from_warehouse_id: str
     to_warehouse_id: str
     items: List[BatchTransferItem] = Field(..., min_length=1)
     remark: Optional[str] = None
 
 
-class StocktakeRequest(BaseModel):
+class StocktakeRequest(ApiSchema):
     product_id: str
     warehouse_id: str
     actual_quantity: int = Field(..., ge=0)
     remark: Optional[str] = None
 
 
-class BatchStocktakeItem(BaseModel):
+class BatchStocktakeItem(ApiSchema):
     product_id: str
     actual_quantity: int = Field(..., ge=0)
 
 
-class BatchStocktakeRequest(BaseModel):
+class BatchStocktakeRequest(ApiSchema):
     warehouse_id: str
     items: List[BatchStocktakeItem] = Field(..., min_length=1)
     remark: Optional[str] = None
 
 
-class InventoryListItemOut(BaseModel):
+class InventoryListItemOut(ApiSchema):
     id: str
     product_id: str
     product_info: Optional[str] = None
@@ -154,6 +154,7 @@ class InventoryListItemOut(BaseModel):
     quantity: int
     locked: int
     warning_quantity: int = 0
+    product_image_url: Optional[str] = None
     supplier_id: Optional[str] = None
     supplier_name: Optional[str] = None
     production_date: Optional[str] = None
@@ -171,7 +172,7 @@ class InventoryListItemOut(BaseModel):
         return str(v) if v is not None else None
 
 
-class InventoryMovementItemOut(BaseModel):
+class InventoryMovementItemOut(ApiSchema):
     id: str
     movement_id: str
     product_id: str
@@ -192,7 +193,7 @@ class InventoryMovementItemOut(BaseModel):
         return str(v)
 
 
-class InventoryMovementOut(BaseModel):
+class InventoryMovementOut(ApiSchema):
     id: str
     order_no: str
     movement_type: MovementType
@@ -218,7 +219,7 @@ class InventoryMovementOut(BaseModel):
         return str(v) if v is not None else None
 
 
-class SupplierCreate(BaseModel):
+class SupplierCreate(ApiSchema):
     name: str = Field(..., min_length=1, max_length=100)
     contact_person: Optional[str] = Field(None, max_length=100)
     contact_phone: Optional[str] = Field(None, max_length=20)
@@ -227,7 +228,7 @@ class SupplierCreate(BaseModel):
     status: SupplierStatus = SupplierStatus.active
 
 
-class SupplierUpdate(BaseModel):
+class SupplierUpdate(ApiSchema):
     name: Optional[str] = Field(None, max_length=100)
     contact_person: Optional[str] = Field(None, max_length=100)
     contact_phone: Optional[str] = Field(None, max_length=20)
@@ -236,7 +237,7 @@ class SupplierUpdate(BaseModel):
     status: Optional[SupplierStatus] = None
 
 
-class SupplierOut(BaseModel):
+class SupplierOut(ApiSchema):
     id: str
     name: str
     contact_person: Optional[str]

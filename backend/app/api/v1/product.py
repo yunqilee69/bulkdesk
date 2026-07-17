@@ -8,7 +8,7 @@ from app.core.database import get_db
 from app.core.deps import AdminUser, CurrentUser
 from app.models.product import PriceType, ProductStatus
 from app.schemas.common import PaginatedResponse, ResponseBase
-from app.schemas.product import BrandCreate, BrandOut, BrandUpdate, CategoryCreate, CategoryOut, CategoryUpdate, MemberPriceBatchUpdate, MemberPriceItemOut, PriceChangeLogOut, PriceChangeRequest, ProductCreate, ProductOut, ProductUpdate
+from app.schemas.product import BrandCreate, BrandOut, BrandUpdate, CategoryCreate, CategoryOut, CategoryUpdate, MemberPriceBatchUpdate, MemberPriceItemOut, PriceChangeLogOut, PriceChangeRequest, ProductCreate, ProductOut, ProductUpdate, ProductWarningQuantityUpdate
 from app.services import product_service
 
 router = APIRouter(prefix="/products", tags=["Product"])
@@ -34,13 +34,44 @@ async def update_category(category_id: str, req: CategoryUpdate, admin: AdminUse
     except ValueError as error: _bad(error)
 
 @router.get("", response_model=ResponseBase[PaginatedResponse[ProductOut]])
-async def list_products(page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100), keyword: Optional[str] = None, category_id: Optional[str] = None, barcode: Optional[str] = None, product_status: Optional[ProductStatus] = Query(None, alias="status"), user: CurrentUser = None, db: AsyncSession = Depends(get_db)):
-    return ResponseBase(data=await product_service.list_products(db, page, page_size, keyword, category_id, barcode, product_status))
+async def list_products(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    keyword: Optional[str] = None,
+    category_id: Optional[str] = None,
+    brand_id: Optional[str] = None,
+    barcode: Optional[str] = None,
+    min_cost_price: Optional[float] = Query(None, ge=0),
+    max_cost_price: Optional[float] = Query(None, ge=0),
+    min_standard_price: Optional[float] = Query(None, ge=0),
+    max_standard_price: Optional[float] = Query(None, ge=0),
+    product_status: Optional[ProductStatus] = Query(None, alias="status"),
+    user: CurrentUser = None,
+    db: AsyncSession = Depends(get_db),
+):
+    return ResponseBase(
+        data=await product_service.list_products(
+            db,
+            page,
+            page_size,
+            keyword,
+            category_id,
+            brand_id,
+            barcode,
+            min_cost_price,
+            max_cost_price,
+            min_standard_price,
+            max_standard_price,
+            product_status,
+        )
+    )
 @router.post("", response_model=ResponseBase[ProductOut], status_code=status.HTTP_201_CREATED)
 async def create_product(req: ProductCreate, admin: AdminUser, db: AsyncSession = Depends(get_db)):
     try: return ResponseBase(data=await product_service.create_product(db, req, admin.username))
     except ValueError as error: _bad(error)
     except IntegrityError: raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="条形码已存在")
+@router.get("/price-change-logs", response_model=ResponseBase[PaginatedResponse[PriceChangeLogOut]])
+async def list_all_price_logs(page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100), user: CurrentUser = None, db: AsyncSession = Depends(get_db)): return ResponseBase(data=await product_service.list_price_change_logs(db, None, page, page_size))
 @router.get("/{product_id}", response_model=ResponseBase[ProductOut])
 async def get_product(product_id: str, user: CurrentUser = None, db: AsyncSession = Depends(get_db)):
     try: return ResponseBase(data=await product_service.get_product(db, product_id))
@@ -48,6 +79,11 @@ async def get_product(product_id: str, user: CurrentUser = None, db: AsyncSessio
 @router.put("/{product_id}", response_model=ResponseBase[ProductOut])
 async def update_product(product_id: str, req: ProductUpdate, admin: AdminUser, db: AsyncSession = Depends(get_db)):
     try: return ResponseBase(data=await product_service.update_product(db, product_id, req))
+    except ValueError as error: _bad(error)
+
+@router.patch("/{product_id}/warning-quantity", response_model=ResponseBase[ProductOut])
+async def update_product_warning_quantity(product_id: str, req: ProductWarningQuantityUpdate, admin: AdminUser, db: AsyncSession = Depends(get_db)):
+    try: return ResponseBase(data=await product_service.update_product_warning_quantity(db, product_id, req.warning_quantity))
     except ValueError as error: _bad(error)
 
 @router.put("/{product_id}/standard-price", response_model=ResponseBase[ProductOut])

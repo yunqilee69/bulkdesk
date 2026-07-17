@@ -90,7 +90,6 @@ class Inventory(UUIDMixin, TimestampMixin, Base):
     )
     quantity: Mapped[int] = mapped_column(default=0, nullable=False)
     locked: Mapped[int] = mapped_column(default=0, nullable=False)
-    warning_quantity: Mapped[int] = mapped_column(default=0, nullable=False)
     supplier_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         ForeignKey("suppliers.id"), nullable=True
     )

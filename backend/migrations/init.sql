@@ -135,6 +135,7 @@ CREATE TABLE products (
     cost_price NUMERIC(12,2) NOT NULL,
     description TEXT,
     image_urls JSON,
+    warning_quantity INTEGER NOT NULL DEFAULT 0 CHECK (warning_quantity >= 0),
     status product_status NOT NULL DEFAULT 'active',
     created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW(),
@@ -215,7 +216,6 @@ CREATE TABLE inventory (
     warehouse_id UUID NOT NULL,
     quantity INTEGER NOT NULL DEFAULT 0,
     locked INTEGER NOT NULL DEFAULT 0,
-    warning_quantity INTEGER NOT NULL DEFAULT 0,
     supplier_id UUID,
     production_date DATE,
     expiry_date DATE,
@@ -385,6 +385,7 @@ COMMENT ON COLUMN products.barcode IS '商品条码';
 COMMENT ON COLUMN products.sort_order IS '排序值，数值越小越靠前';
 COMMENT ON COLUMN products.description IS '商品描述';
 COMMENT ON COLUMN products.image_urls IS '商品图片 URL 列表';
+COMMENT ON COLUMN products.warning_quantity IS '商品库存预警阈值';
 COMMENT ON COLUMN products.status IS '状态：active 启用，disabled 停用';
 COMMENT ON COLUMN products.created_at IS '创建时间';
 COMMENT ON COLUMN products.updated_at IS '更新时间';
@@ -461,7 +462,6 @@ COMMENT ON COLUMN inventory.product_id IS '商品 ID';
 COMMENT ON COLUMN inventory.warehouse_id IS '仓库 ID';
 COMMENT ON COLUMN inventory.quantity IS '可用库存数量';
 COMMENT ON COLUMN inventory.locked IS '订单锁定库存数量';
-COMMENT ON COLUMN inventory.warning_quantity IS '库存预警阈值';
 COMMENT ON COLUMN inventory.supplier_id IS '供应商 ID';
 COMMENT ON COLUMN inventory.production_date IS '生产日期';
 COMMENT ON COLUMN inventory.expiry_date IS '到期日期';

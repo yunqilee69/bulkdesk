@@ -5,9 +5,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.customer import Customer
 from app.models.employee import Employee
-from app.models.inventory import Inventory, Warehouse
+from app.models.inventory import Inventory
 from app.models.order import Order, OrderItem
-from app.models.product import Brand, Product, Product
+from app.models.product import Brand, Product
 from app.schemas.dashboard import (
     CustomerRankingItem,
     DashboardStats,
@@ -112,40 +112,36 @@ async def _get_customer_ranking(db: AsyncSession, limit: int = 10) -> list[Custo
 async def _get_inventory_alerts(db: AsyncSession) -> list[InventoryAlertItem]:
     query = (
         select(
-            Inventory.id,
-            Inventory.product_id,
-            Inventory.quantity,
-            Inventory.locked,
-            Inventory.warning_quantity,
-            Warehouse.name.label("warehouse_name"),
+            Product.id.label("product_id"),
+            Product.barcode,
+            Product.name,
+            Product.image_urls,
+            Product.warning_quantity,
+            func.sum(Inventory.quantity).label("quantity"),
+            func.sum(Inventory.locked).label("locked"),
+            func.count(Inventory.warehouse_id).label("warehouse_count"),
         )
-        .join(Warehouse, Inventory.warehouse_id == Warehouse.id)
-        .where(
-            Inventory.quantity - Inventory.locked <= Inventory.warning_quantity
-        )
-        .where(Inventory.warning_quantity > 0)
+        .join(Product, Inventory.product_id == Product.id)
+        .where(Product.warning_quantity > 0)
+        .group_by(Product.id)
+        .having(func.sum(Inventory.quantity - Inventory.locked) <= Product.warning_quantity)
         .order_by(
-            (
-                Inventory.warning_quantity
-                - (Inventory.quantity - Inventory.locked)
-            ).desc()
+            (Product.warning_quantity - func.sum(Inventory.quantity - Inventory.locked)).desc()
         )
     )
     result = await db.execute(query)
     rows = result.all()
 
-    product_ids = [str(row.product_id) for row in rows]
-    info = await _lookup_variant_info(db, product_ids) if product_ids else {}
-
     return [
         InventoryAlertItem(
-            id=str(row.id),
+            id=str(row.product_id),
             product_id=str(row.product_id),
-            product_info=_format_product_info(info.get(str(row.product_id))),
-            warehouse_name=row.warehouse_name,
+            product_info=f"{row.barcode} - {row.name}",
             quantity=row.quantity,
             locked=row.locked,
             warning_quantity=row.warning_quantity,
+            product_image_url=(row.image_urls or [None])[0],
+            warehouse_count=row.warehouse_count,
         )
         for row in rows
     ]

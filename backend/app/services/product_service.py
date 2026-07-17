@@ -1,9 +1,10 @@
 from typing import Optional
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.customer import CustomerLevel, MemberPrice
+from app.models.inventory import Inventory
 from app.models.product import Brand, Category, PriceChangeLog, PriceType, Product, ProductStatus
 from app.schemas.common import PaginatedResponse
 from app.schemas.product import (
@@ -42,6 +43,18 @@ async def update_category(db: AsyncSession, category_id: str, req: CategoryUpdat
 async def _require_product(db: AsyncSession, product_id: str):
     product = (await db.execute(select(Product).where(Product.id == product_id))).scalar_one_or_none()
     if not product: raise ValueError("商品不存在")
+    return product
+
+
+async def update_product_warning_quantity(
+    db: AsyncSession,
+    product_id: str,
+    warning_quantity: int,
+) -> Product:
+    product = await _require_product(db, product_id)
+    product.warning_quantity = warning_quantity
+    await db.flush()
+    await db.refresh(product)
     return product
 
 async def _populate_product_out(db: AsyncSession, product: Product):
@@ -83,13 +96,56 @@ async def create_product(db: AsyncSession, req: ProductCreate, operator_name: Op
     await db.flush()
     return await _populate_product_out(db, product)
 
-async def list_products(db: AsyncSession, page=1, page_size=20, keyword: Optional[str] = None, category_id: Optional[str] = None, barcode: Optional[str] = None, status: Optional[ProductStatus] = None):
-    query = select(Product); count = select(func.count()).select_from(Product)
-    for cond in [Product.name.ilike(f"%{keyword}%") if keyword else None, Product.category_id == category_id if category_id else None, Product.barcode.ilike(f"%{barcode}%") if barcode else None, Product.status == status if status else None]:
+async def list_products(
+    db: AsyncSession,
+    page=1,
+    page_size=20,
+    keyword: Optional[str] = None,
+    category_id: Optional[str] = None,
+    brand_id: Optional[str] = None,
+    barcode: Optional[str] = None,
+    min_cost_price: Optional[float] = None,
+    max_cost_price: Optional[float] = None,
+    min_standard_price: Optional[float] = None,
+    max_standard_price: Optional[float] = None,
+    status: Optional[ProductStatus] = None,
+):
+    inventory_totals = (
+        select(
+            Inventory.product_id.label("product_id"),
+            func.sum(Inventory.quantity - Inventory.locked).label("available_quantity"),
+            func.sum(Inventory.locked).label("locked_quantity"),
+        )
+        .group_by(Inventory.product_id)
+        .subquery()
+    )
+    query = select(
+        Product,
+        func.coalesce(inventory_totals.c.available_quantity, 0).label("available_quantity"),
+        func.coalesce(inventory_totals.c.locked_quantity, 0).label("locked_quantity"),
+    ).outerjoin(inventory_totals, inventory_totals.c.product_id == Product.id)
+    count = select(func.count()).select_from(Product)
+    for cond in [
+        or_(Product.name.ilike(f"%{keyword}%"), Product.short_name.ilike(f"%{keyword}%")) if keyword else None,
+        Product.category_id == category_id if category_id else None,
+        Product.brand_id == brand_id if brand_id else None,
+        Product.barcode.ilike(f"%{barcode}%") if barcode else None,
+        Product.cost_price >= min_cost_price if min_cost_price is not None else None,
+        Product.cost_price <= max_cost_price if max_cost_price is not None else None,
+        Product.standard_price >= min_standard_price if min_standard_price is not None else None,
+        Product.standard_price <= max_standard_price if max_standard_price is not None else None,
+        Product.status == status if status else None,
+    ]:
         if cond is not None: query, count = query.where(cond), count.where(cond)
     total = (await db.execute(count)).scalar() or 0
-    products = (await db.execute(query.order_by(Product.created_at.desc()).offset((page-1)*page_size).limit(page_size))).scalars().all()
-    return PaginatedResponse(items=[await _populate_product_out(db, product) for product in products], total=total, page=page, page_size=page_size)
+    rows = (await db.execute(query.order_by(Product.created_at.desc()).offset((page-1)*page_size).limit(page_size))).all()
+    items = []
+    for product, available_quantity, locked_quantity in rows:
+        item = await _populate_product_out(db, product)
+        item.available_quantity = available_quantity
+        item.locked_quantity = locked_quantity
+        items.append(item)
+    return PaginatedResponse(items=items, total=total, page=page, page_size=page_size)
 
 async def get_product(db: AsyncSession, product_id: str): return await _populate_product_out(db, await _require_product(db, product_id))
 async def update_product(db: AsyncSession, product_id: str, req: ProductUpdate):
@@ -175,16 +231,19 @@ async def change_price(db: AsyncSession, product_id: str, price_type: PriceType,
         else: db.add(MemberPrice(product_id=product.id, level_id=level_id, price=req.price))
     else:
         field = "standard_price" if price_type == PriceType.standard_price else "cost_price"; old_value = getattr(product, field); setattr(product, field, req.price)
-    db.add(PriceChangeLog(product_id=product.id, price_type=price_type, level_id=level_id, old_value=old_value, new_value=req.price, reason=req.reason, operator_name=operator_name)); await db.flush(); return await _populate_product_out(db, product)
+    db.add(PriceChangeLog(product_id=product.id, price_type=price_type, level_id=level_id, old_value=old_value, new_value=req.price, reason=req.reason, operator_name=operator_name)); await db.flush(); await db.refresh(product); return await _populate_product_out(db, product)
 
 async def list_price_change_logs(db: AsyncSession, product_id: Optional[str] = None, page=1, page_size=20):
-    query = select(PriceChangeLog, CustomerLevel.name); count = select(func.count()).select_from(PriceChangeLog)
+    query = select(PriceChangeLog, CustomerLevel.name, Product.name, Product.barcode); count = select(func.count()).select_from(PriceChangeLog)
     query = query.outerjoin(CustomerLevel, CustomerLevel.id == PriceChangeLog.level_id)
+    query = query.outerjoin(Product, Product.id == PriceChangeLog.product_id)
     if product_id: query, count = query.where(PriceChangeLog.product_id == product_id), count.where(PriceChangeLog.product_id == product_id)
     total = (await db.execute(count)).scalar() or 0; rows = (await db.execute(query.order_by(PriceChangeLog.created_at.desc()).offset((page-1)*page_size).limit(page_size))).all()
     items = []
-    for log, level_name in rows:
+    for log, level_name, product_name, barcode in rows:
         item = PriceChangeLogOut.model_validate(log)
         item.level_name = level_name
+        item.product_name = product_name
+        item.barcode = barcode
         items.append(item)
     return PaginatedResponse(items=items, total=total, page=page, page_size=page_size)

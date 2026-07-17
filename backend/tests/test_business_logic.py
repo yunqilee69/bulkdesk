@@ -19,12 +19,25 @@ from app.models.inventory import (
 )
 from app.models.employee import Employee, EmployeeRole, EmployeeStatus
 from app.models.order import Order, OrderItem, OrderStatus
-from app.models.product import PriceChangeLog, PriceType, Product
+from app.models.product import PriceChangeLog, PriceType, Product, ProductStatus
 from app.schemas.dashboard import DashboardStats
-from app.schemas.inventory import StockInRequest, TransferRequest, WarehouseCreate
+from app.schemas.inventory import (
+    InventoryListItemOut,
+    StockInRequest,
+    TransferRequest,
+    WarehouseCreate,
+)
 from app.schemas.customer import CustomerLevelCreate
 from app.schemas.order import OrderActionRequest, OrderCreate, OrderItemCreate, OrderOut
-from app.schemas.product import MemberPriceBatchItem, MemberPriceBatchUpdate, PriceChangeLogOut, PriceChangeRequest, ProductCreate, ProductUpdate
+from app.schemas.product import (
+    MemberPriceBatchItem,
+    MemberPriceBatchUpdate,
+    PriceChangeLogOut,
+    PriceChangeRequest,
+    ProductCreate,
+    ProductUpdate,
+    ProductWarningQuantityUpdate,
+)
 from app.services import dashboard_service, employee_service, inventory_service, order_service, product_service
 from app.api.v1 import upload as upload_api
 from app.api.v1 import product as product_api
@@ -62,6 +75,7 @@ class QueueDb:
         self.results = list(results or [])
         self.added = []
         self.flushed = False
+        self.refreshed = []
         self.statements = []
 
     async def execute(self, statement):
@@ -82,7 +96,8 @@ class QueueDb:
             if getattr(obj, "id", None) is None:
                 obj.id = uuid.uuid4()
 
-    async def refresh(self, _obj, attribute_names=None):
+    async def refresh(self, obj, attribute_names=None):
+        self.refreshed.append(obj)
         return None
 
 
@@ -473,12 +488,144 @@ async def test_list_price_change_logs_populates_member_level_name():
         reason="调价",
         created_at=datetime.now(timezone.utc),
     )
-    db = QueueDb([FakeResult(scalar=1), FakeResult(values=[(log, "黄金会员")])])
+    db = QueueDb(
+        [
+            FakeResult(scalar=1),
+            FakeResult(values=[(log, "黄金会员", "测试商品", "6900000000001")]),
+        ]
+    )
 
     result = await product_service.list_price_change_logs(db, str(product_id))
 
     assert result.total == 1
     assert result.items[0].level_name == "黄金会员"
+    assert result.items[0].product_name == "测试商品"
+
+
+@pytest.mark.asyncio
+async def test_list_all_price_change_logs_includes_product_details():
+    product_id = uuid.uuid4()
+    log = PriceChangeLog(
+        id=uuid.uuid4(),
+        product_id=product_id,
+        price_type=PriceType.standard_price,
+        old_value=Decimal("80"),
+        new_value=Decimal("90"),
+        reason="调价",
+        created_at=datetime.now(timezone.utc),
+    )
+    db = QueueDb(
+        [
+            FakeResult(scalar=1),
+            FakeResult(values=[(log, None, "测试商品", "6900000000001")]),
+        ]
+    )
+
+    result = await product_service.list_price_change_logs(db)
+
+    assert result.items[0].product_name == "测试商品"
+    assert result.items[0].barcode == "6900000000001"
+
+
+@pytest.mark.asyncio
+async def test_change_standard_price_refreshes_product_before_serializing():
+    product = Product(
+        id=uuid.uuid4(),
+        name="测试商品",
+        barcode="6900000000001",
+        category_id=uuid.uuid4(),
+        unit="件",
+        standard_price=Decimal("80"),
+        cost_price=Decimal("50"),
+        status="active",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+    db = QueueDb([FakeResult(one=product), FakeResult(one="食品")])
+
+    result = await product_service.change_price(
+        db,
+        str(product.id),
+        PriceType.standard_price,
+        PriceChangeRequest(price=90, reason="调价"),
+        "admin",
+    )
+
+    assert result.standard_price == 90
+    assert db.refreshed == [product]
+
+
+@pytest.mark.asyncio
+async def test_all_price_logs_route_queries_without_product_filter(monkeypatch):
+    received = {}
+    db = object()
+
+    async def fake_list_price_change_logs(db, product_id, page, page_size):
+        received.update(
+            db=db,
+            product_id=product_id,
+            page=page,
+            page_size=page_size,
+        )
+        return "logs"
+
+    monkeypatch.setattr(product_api.product_service, "list_price_change_logs", fake_list_price_change_logs)
+
+    response = await product_api.list_all_price_logs(page=2, page_size=50, user=object(), db=db)
+
+    assert response.data == "logs"
+    assert received == {
+        "db": db,
+        "product_id": None,
+        "page": 2,
+        "page_size": 50,
+    }
+
+
+@pytest.mark.asyncio
+async def test_products_route_forwards_all_search_filters(monkeypatch):
+    received = {}
+    db = object()
+    category_id = str(uuid.uuid4())
+    brand_id = str(uuid.uuid4())
+
+    async def fake_list_products(*args):
+        received["args"] = args
+        return "products"
+
+    monkeypatch.setattr(product_api.product_service, "list_products", fake_list_products)
+
+    response = await product_api.list_products(
+        page=2,
+        page_size=50,
+        keyword="茉莉",
+        category_id=category_id,
+        brand_id=brand_id,
+        barcode="6900",
+        min_cost_price=10,
+        max_cost_price=20,
+        min_standard_price=30,
+        max_standard_price=40,
+        product_status=ProductStatus.active,
+        user=object(),
+        db=db,
+    )
+
+    assert response.data == "products"
+    assert received["args"] == (
+        db,
+        2,
+        50,
+        "茉莉",
+        category_id,
+        brand_id,
+        "6900",
+        10,
+        20,
+        30,
+        40,
+        ProductStatus.active,
+    )
 
 
 @pytest.mark.asyncio
@@ -916,13 +1063,85 @@ async def test_inventory_get_or_create_is_atomic_and_locks_row():
 
 
 @pytest.mark.asyncio
-async def test_inventory_alert_uses_available_quantity():
+async def test_inventory_alert_groups_available_quantity_by_product():
     db = QueueDb([FakeResult(values=[])])
 
     await dashboard_service._get_inventory_alerts(db)
 
     sql = db.statements[0]
-    assert "inventory.quantity - inventory.locked" in sql
+    assert "sum(inventory.quantity - inventory.locked)" in sql
+    assert "GROUP BY products.id" in sql
+    assert "inventory.warning_quantity" not in sql
+
+
+def test_product_warning_quantity_request_rejects_negative_values():
+    with pytest.raises(ValidationError):
+        ProductWarningQuantityUpdate(warning_quantity=-1)
+
+
+@pytest.mark.asyncio
+async def test_update_product_warning_quantity_updates_product_only():
+    product = Product(id=uuid.uuid4(), barcode="6900000000101", name="预警商品")
+    db = QueueDb([FakeResult(one=product)])
+
+    result = await product_service.update_product_warning_quantity(
+        db, str(product.id), 12
+    )
+
+    assert result.warning_quantity == 12
+    assert db.flushed is True
+    assert db.refreshed == [product]
+
+
+def test_inventory_list_item_exposes_product_warning_and_image():
+    item = InventoryListItemOut(
+        id=str(uuid.uuid4()),
+        product_id=str(uuid.uuid4()),
+        warehouse_id=str(uuid.uuid4()),
+        quantity=5,
+        locked=1,
+        warning_quantity=12,
+        product_image_url="https://example.com/product.png",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+
+    assert item.warning_quantity == 12
+    assert item.product_image_url == "https://example.com/product.png"
+
+
+@pytest.mark.asyncio
+async def test_product_list_aggregates_available_quantity_across_warehouses():
+    product = Product(
+        id=uuid.uuid4(),
+        name="可销售商品",
+        barcode="6900000000201",
+        category_id=uuid.uuid4(),
+        unit="件",
+        standard_price=Decimal("20"),
+        cost_price=Decimal("10"),
+        image_urls=["https://example.com/product.png"],
+        status="active",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+    db = QueueDb(
+        [
+            FakeResult(scalar=1),
+            FakeResult(values=[(product, 7, 3)]),
+            FakeResult(one="食品"),
+        ]
+    )
+
+    result = await product_service.list_products(db)
+
+    assert result.items[0].available_quantity == 7
+    assert result.items[0].locked_quantity == 3
+    sql = db.statements[1]
+    assert "sum(inventory.quantity - inventory.locked)" in sql
+    assert "sum(inventory.locked)" in sql
+    assert "coalesce" in sql
+    assert "LEFT OUTER JOIN" in sql
 
 
 @pytest.mark.asyncio
@@ -1109,3 +1328,31 @@ async def test_transfer_records_separate_out_and_in_movements(monkeypatch):
     assert movements[0].items[0].after_quantity == 6
     assert movements[1].items[0].before_quantity == 3
     assert movements[1].items[0].after_quantity == 7
+
+
+@pytest.mark.asyncio
+async def test_list_products_filters_by_keyword_brand_and_inclusive_price_ranges():
+    db = QueueDb([FakeResult(scalar=0), FakeResult(values=[])])
+
+    await product_service.list_products(
+        db,
+        keyword="茉莉",
+        barcode="6900",
+        category_id=str(uuid.uuid4()),
+        brand_id=str(uuid.uuid4()),
+        status=ProductStatus.active,
+        min_cost_price=10,
+        max_cost_price=20,
+        min_standard_price=30,
+        max_standard_price=40,
+    )
+
+    count_sql, query_sql = db.statements
+    for sql in (count_sql, query_sql):
+        assert "products.short_name" in sql
+        assert "products.brand_id" in sql
+        assert "products.cost_price >=" in sql
+        assert "products.cost_price <=" in sql
+        assert "products.standard_price >=" in sql
+        assert "products.standard_price <=" in sql
+        assert "products.barcode" in sql

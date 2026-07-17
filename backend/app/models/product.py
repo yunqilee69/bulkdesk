@@ -86,6 +86,7 @@ class Product(UUIDMixin, TimestampMixin, Base):
     cost_price: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     image_urls: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    warning_quantity: Mapped[int] = mapped_column(default=0, nullable=False)
     status: Mapped[ProductStatus] = mapped_column(
         Enum(ProductStatus, name="product_status", native_enum=True),
         default=ProductStatus.active,

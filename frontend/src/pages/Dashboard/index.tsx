@@ -67,7 +67,7 @@ const Dashboard: React.FC = () => {
 
   const alertColumns = [
     { title: '商品', dataIndex: 'product_info', key: 'product_info', ellipsis: true },
-    { title: '仓库', dataIndex: 'warehouse_name', key: 'warehouse_name', width: 120 },
+    { title: '涉及仓库', dataIndex: 'warehouse_count', key: 'warehouse_count', width: 100 },
     {
       title: '当前库存',
       key: 'current',

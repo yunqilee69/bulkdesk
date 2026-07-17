@@ -1,30 +1,30 @@
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel
+from app.schemas.common import ApiSchema
 
-
-class OrderTrendItem(BaseModel):
+class OrderTrendItem(ApiSchema):
     date: str
     order_count: int
     order_amount: float
 
 
-class CustomerRankingItem(BaseModel):
+class CustomerRankingItem(ApiSchema):
     customer_id: str
     customer_name: str
     total_amount: float
     order_count: int
 
 
-class InventoryAlertItem(BaseModel):
+class InventoryAlertItem(ApiSchema):
     id: str
     product_id: str
     product_info: str
-    warehouse_name: str
     quantity: int
     locked: int
     warning_quantity: int
+    product_image_url: Optional[str] = None
+    warehouse_count: int = 0
 
     model_config = {"from_attributes": True}
 
@@ -33,7 +33,7 @@ class InventoryAlertItem(BaseModel):
         return str(v) if v is not None else None
 
 
-class ProductSaleItem(BaseModel):
+class ProductSaleItem(ApiSchema):
     product_id: str
     barcode: str
     product_name: str
@@ -41,7 +41,7 @@ class ProductSaleItem(BaseModel):
     total_amount: float
 
 
-class DashboardStats(BaseModel):
+class DashboardStats(ApiSchema):
     customer_total: int
     product_total: int
     order_total: int

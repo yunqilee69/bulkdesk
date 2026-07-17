@@ -49,10 +49,11 @@ declare namespace API {
     id: string;
     product_id: string;
     product_info: string;
-    warehouse_name: string;
     quantity: number;
     locked: number;
     warning_quantity: number;
+    product_image_url?: string;
+    warehouse_count: number;
   }
   interface ProductSaleItem {
     product_id: string;

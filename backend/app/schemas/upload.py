@@ -1,8 +1,8 @@
-from pydantic import BaseModel
 from typing import Optional
 
+from app.schemas.common import ApiSchema
 
-class UploadResult(BaseModel):
+class UploadResult(ApiSchema):
     key: str
     url: str
     filename: str
@@ -10,5 +10,5 @@ class UploadResult(BaseModel):
     size: int
 
 
-class FileDeleteRequest(BaseModel):
+class FileDeleteRequest(ApiSchema):
     key: str

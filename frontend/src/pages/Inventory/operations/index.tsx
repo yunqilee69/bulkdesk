@@ -1,28 +1,13 @@
 import { PageContainer } from '@ant-design/pro-components';
-import { Button, Card, Input, InputNumber, message, Modal, Select, Space, Table, Tabs, Tree } from 'antd';
-import type { DataNode } from 'antd/es/tree';
-import { MinusCircleOutlined, PlusOutlined, SearchOutlined } from '@ant-design/icons';
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { Button, Card, Input, InputNumber, message, Modal, Select, Space, Table, Tabs } from 'antd';
+import { MinusCircleOutlined, PlusOutlined } from '@ant-design/icons';
+import React, { useState, useEffect, useRef } from 'react';
 import { listAllWarehouses, listAllSuppliers, listAllInventory, batchStockIn, batchStockOut, batchTransfer, batchStocktake } from '@/services/inventory';
-import { listAllProducts } from '@/services/product';
+import ProductSelectModal, { type SelectableProduct } from '@/components/ProductSelectModal';
 import { loadInventoryQuantities } from './inventoryState';
 import { runWithSubmissionLock } from './submission';
 
 // --- Shared types ---
-
-interface ProductWithVariants {
-  id: string;
-  name: string;
-  brand_name?: string;
-  status: string;
-  variants: Array<{
-    id: string;
-    barcode: string;
-    name: string;
-    cost_price: number;
-    status: string;
-  }>;
-}
 
 interface StockInRow {
   product_id: string;
@@ -59,50 +44,6 @@ interface StocktakeRow {
   actual_quantity: number;
 }
 
-// --- Shared helpers ---
-
-function buildTreeData(products: ProductWithVariants[], keyword: string): DataNode[] {
-  const filtered = keyword
-    ? products.filter(
-        (p) =>
-          p.name.includes(keyword) ||
-          p.variants.some((v) => v.barcode.includes(keyword) || v.name.includes(keyword)),
-      )
-    : products;
-
-  return filtered
-    .filter((p) => p.status === 'active')
-    .map((p) => ({
-      key: `product-${p.id}`,
-      title: p.brand_name ? `${p.name} [${p.brand_name}]` : p.name,
-      selectable: false,
-      children: p.variants
-        .filter((v) => v.status === 'active')
-        .map((v) => ({
-          key: `product-${v.id}`,
-          title: `${v.barcode} - ${v.name}  成本价:¥${v.cost_price}`,
-          isLeaf: true,
-        })),
-    }))
-    .filter((n) => n.children && n.children.length > 0);
-}
-
-function buildVariantLookup(products: ProductWithVariants[]) {
-  const lookup: Record<string, { barcode: string; name: string; cost_price: number; product_name: string; brand_name: string }> = {};
-  for (const p of products) {
-    for (const v of p.variants) {
-      lookup[v.id] = {
-        barcode: v.barcode,
-        name: v.name,
-        cost_price: v.cost_price,
-        product_name: p.name,
-        brand_name: p.brand_name || '',
-      };
-    }
-  }
-  return lookup;
-}
-
 // --- Main Component ---
 
 const OperationsPage: React.FC = () => {
@@ -111,14 +52,7 @@ const OperationsPage: React.FC = () => {
   // Shared warehouse/supplier options
   const [warehouseOptions, setWarehouseOptions] = useState<Array<{ label: string; value: string }>>([]);
   const [supplierOptions, setSupplierOptions] = useState<Array<{ label: string; value: string }>>([]);
-  const [allProducts, setAllProducts] = useState<ProductWithVariants[]>([]);
-
-  // Shared 商品 modal state
-  const [productModalOpen, setSkuModalOpen] = useState(false);
-  const [treeData, setTreeData] = useState<DataNode[]>([]);
-  const [checkedKeys, setCheckedKeys] = useState<string[]>([]);
-  const [expandedKeys, setExpandedKeys] = useState<string[]>([]);
-  const [searchKeyword, setSearchKeyword] = useState('');
+  const [productModalOpen, setProductModalOpen] = useState(false);
 
   // Stock-in tab state
   const [siWarehouseId, setSiWarehouseId] = useState<string | undefined>();
@@ -166,44 +100,15 @@ const OperationsPage: React.FC = () => {
       .catch(() => message.error('库存操作基础数据加载失败，请刷新页面'));
   }, []);
 
-  // Load products for tree
-  const loadProducts = useCallback(async () => {
-    const raw = await listAllProducts();
-    const products: ProductWithVariants[] = raw.map((p: Record<string, unknown>) => ({
-      id: String(p.id),
-      name: String(p.name),
-      brand_name: p.brand_name ? String(p.brand_name) : '',
-      status: String(p.status),
-      variants: (p.variants as Record<string, unknown>[])?.map((v) => ({
-        id: String(v.id),
-        barcode: String(v.barcode),
-        name: String(v.name),
-        cost_price: Number(v.cost_price),
-        status: String(v.status),
-      })) ?? [],
-    }));
-    setAllProducts(products);
-    setTreeData(buildTreeData(products, searchKeyword));
-  }, [searchKeyword]);
-
-  // Open 商品 modal
-  const openSkuModal = async () => {
+  const openProductModal = () => {
     if (activeTab === 'stocktake' && !stWarehouseId) {
       message.warning('请先选择仓库');
       return;
     }
-    try {
-      await loadProducts();
-    } catch {
-      message.error('商品 商品 加载失败，请重试');
-      return;
-    }
-    const existingIds = getExistingSkuIds();
-    setCheckedKeys(existingIds.map((id) => `product-${id}`));
-    setSkuModalOpen(true);
+    setProductModalOpen(true);
   };
 
-  const getExistingSkuIds = (): string[] => {
+  const getExistingProductIds = (): string[] => {
     switch (activeTab) {
       case 'stock-in': return siRows.map((r) => r.product_id);
       case 'stock-out': return soRows.map((r) => r.product_id);
@@ -213,28 +118,48 @@ const OperationsPage: React.FC = () => {
     }
   };
 
-  // Handle 商品 selection confirm
-  const handleSkuConfirm = async () => {
-    const selectedSkuIds = checkedKeys
-      .filter((k) => k.startsWith('product-'))
-      .map((k) => k.replace('product-', ''));
+  const getExistingProducts = (): SelectableProduct[] => {
+    const toSelectableProduct = (row: {
+      product_id: string;
+      product_name: string;
+      barcode: string;
+      brand_name: string;
+      cost_price?: number;
+    }): SelectableProduct => ({
+      id: row.product_id,
+      name: row.product_name,
+      barcode: row.barcode,
+      category_id: '',
+      brand_name: row.brand_name,
+      unit: '',
+      cost_price: row.cost_price ?? 0,
+      standard_price: 0,
+      status: 'active',
+    });
 
-    const variantLookup = buildVariantLookup(allProducts);
+    switch (activeTab) {
+      case 'stock-in': return siRows.map(toSelectableProduct);
+      case 'stock-out': return soRows.map(toSelectableProduct);
+      case 'transfer': return trRows.map(toSelectableProduct);
+      case 'stocktake': return stRows.map(toSelectableProduct);
+      default: return [];
+    }
+  };
 
+  const handleProductConfirm = async (selectedProducts: SelectableProduct[]) => {
     switch (activeTab) {
       case 'stock-in': {
         const existingMap = new Map(siRows.map((r) => [r.product_id, r]));
         const newRows: StockInRow[] = [];
-        for (const id of selectedSkuIds) {
-          const existing = existingMap.get(id);
+        for (const product of selectedProducts) {
+          const existing = existingMap.get(product.id);
           if (existing) {
             newRows.push(existing);
-          } else if (variantLookup[id]) {
-            const v = variantLookup[id];
+          } else {
             newRows.push({
-              product_id: id, barcode: v.barcode, product_name: v.name,
-              brand_name: v.brand_name,
-              quantity: 1, cost_price: v.cost_price, original_cost_price: v.cost_price,
+              product_id: product.id, barcode: product.barcode, product_name: product.name,
+              brand_name: product.brand_name || '',
+              quantity: 1, cost_price: product.cost_price, original_cost_price: product.cost_price,
             });
           }
         }
@@ -244,15 +169,14 @@ const OperationsPage: React.FC = () => {
       case 'stock-out': {
         const existingMap = new Map(soRows.map((r) => [r.product_id, r]));
         const newRows: StockOutRow[] = [];
-        for (const id of selectedSkuIds) {
-          const existing = existingMap.get(id);
+        for (const product of selectedProducts) {
+          const existing = existingMap.get(product.id);
           if (existing) {
             newRows.push(existing);
-          } else if (variantLookup[id]) {
-            const v = variantLookup[id];
+          } else {
             newRows.push({
-              product_id: id, barcode: v.barcode, product_name: v.name,
-              brand_name: v.brand_name, quantity: 1,
+              product_id: product.id, barcode: product.barcode, product_name: product.name,
+              brand_name: product.brand_name || '', quantity: 1,
             });
           }
         }
@@ -262,15 +186,14 @@ const OperationsPage: React.FC = () => {
       case 'transfer': {
         const existingMap = new Map(trRows.map((r) => [r.product_id, r]));
         const newRows: TransferRow[] = [];
-        for (const id of selectedSkuIds) {
-          const existing = existingMap.get(id);
+        for (const product of selectedProducts) {
+          const existing = existingMap.get(product.id);
           if (existing) {
             newRows.push(existing);
-          } else if (variantLookup[id]) {
-            const v = variantLookup[id];
+          } else {
             newRows.push({
-              product_id: id, barcode: v.barcode, product_name: v.name,
-              brand_name: v.brand_name, quantity: 1,
+              product_id: product.id, barcode: product.barcode, product_name: product.name,
+              brand_name: product.brand_name || '', quantity: 1,
             });
           }
         }
@@ -290,16 +213,15 @@ const OperationsPage: React.FC = () => {
         }
         const existingMap = new Map(stRows.map((r) => [r.product_id, r]));
         const newRows: StocktakeRow[] = [];
-        for (const id of selectedSkuIds) {
-          const existing = existingMap.get(id);
+        for (const product of selectedProducts) {
+          const existing = existingMap.get(product.id);
           if (existing) {
             newRows.push(existing);
-          } else if (variantLookup[id]) {
-            const v = variantLookup[id];
+          } else {
             newRows.push({
-              product_id: id, barcode: v.barcode, product_name: v.name,
-              brand_name: v.brand_name,
-              current_quantity: invMap[id] ?? 0, actual_quantity: invMap[id] ?? 0,
+              product_id: product.id, barcode: product.barcode, product_name: product.name,
+              brand_name: product.brand_name || '',
+              current_quantity: invMap[product.id] ?? 0, actual_quantity: invMap[product.id] ?? 0,
             });
           }
         }
@@ -308,7 +230,7 @@ const OperationsPage: React.FC = () => {
         break;
       }
     }
-    setSkuModalOpen(false);
+    setProductModalOpen(false);
   };
 
   // --- Stock-in handlers ---
@@ -589,7 +511,7 @@ const OperationsPage: React.FC = () => {
         </Card>
         <Card>
           <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 16 }}>
-            <Button type="primary" icon={<PlusOutlined />} onClick={openSkuModal}>选择商品</Button>
+            <Button type="primary" icon={<PlusOutlined />} onClick={openProductModal}>选择商品</Button>
           </div>
           <Table<StockInRow> dataSource={siRows} columns={siColumns} rowKey="product_id" pagination={false}
             locale={{ emptyText: '暂无商品，请点击"选择商品"添加' }}
@@ -635,7 +557,7 @@ const OperationsPage: React.FC = () => {
         </Card>
         <Card>
           <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 16 }}>
-            <Button type="primary" icon={<PlusOutlined />} onClick={openSkuModal}>选择商品</Button>
+            <Button type="primary" icon={<PlusOutlined />} onClick={openProductModal}>选择商品</Button>
           </div>
           <Table<StockOutRow> dataSource={soRows} columns={soColumns} rowKey="product_id" pagination={false}
             locale={{ emptyText: '暂无商品，请点击"选择商品"添加' }}
@@ -686,7 +608,7 @@ const OperationsPage: React.FC = () => {
         </Card>
         <Card>
           <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 16 }}>
-            <Button type="primary" icon={<PlusOutlined />} onClick={openSkuModal}>选择商品</Button>
+            <Button type="primary" icon={<PlusOutlined />} onClick={openProductModal}>选择商品</Button>
           </div>
           <Table<TransferRow> dataSource={trRows} columns={trColumns} rowKey="product_id" pagination={false}
             locale={{ emptyText: '暂无商品，请点击"选择商品"添加' }}
@@ -734,7 +656,7 @@ const OperationsPage: React.FC = () => {
         </Card>
         <Card>
           <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 16 }}>
-            <Button type="primary" icon={<PlusOutlined />} onClick={openSkuModal}>选择商品</Button>
+            <Button type="primary" icon={<PlusOutlined />} onClick={openProductModal}>选择商品</Button>
           </div>
           <Table<StocktakeRow> dataSource={stRows} columns={stColumns} rowKey="product_id" pagination={false}
             locale={{ emptyText: '暂无商品，请点击"选择商品"添加' }}
@@ -772,35 +694,13 @@ const OperationsPage: React.FC = () => {
         ]}
       />
 
-      <Modal title="选择商品" open={productModalOpen} onCancel={() => setSkuModalOpen(false)}
-        onOk={handleSkuConfirm} okText="确认选择" cancelText="取消" width={600} destroyOnHidden>
-        <div style={{ marginBottom: 12 }}>
-          <Space>
-            <SearchOutlined />
-            <Input style={{ width: 300 }} placeholder="搜索商品或商品" value={searchKeyword}
-              onChange={(e) => {
-                setSearchKeyword(e.target.value);
-                setTreeData(buildTreeData(allProducts, e.target.value));
-                if (e.target.value) {
-                  const nodes = buildTreeData(allProducts, e.target.value);
-                  setExpandedKeys(nodes.map((n) => String(n.key)));
-                }
-              }}
-            />
-          </Space>
-        </div>
-        <Tree checkable checkedKeys={checkedKeys}
-          onCheck={(checked) => {
-            const keys = Array.isArray(checked) ? checked : checked.checked;
-            setCheckedKeys(keys as string[]);
-          }}
-          expandedKeys={expandedKeys}
-          onExpand={(keys) => setExpandedKeys(keys as string[])}
-          treeData={treeData}
-          defaultExpandAll
-          style={{ maxHeight: 400, overflow: 'auto' }}
-        />
-      </Modal>
+      <ProductSelectModal
+        open={productModalOpen}
+        selectedProductIds={getExistingProductIds()}
+        selectedProducts={getExistingProducts()}
+        onCancel={() => setProductModalOpen(false)}
+        onConfirm={handleProductConfirm}
+      />
 
       <Modal title="成本价变动确认" open={siConfirmOpen} onCancel={() => setSiConfirmOpen(false)}
         onOk={doSiSubmit} okText="确认入库" cancelText="取消" width={500}>

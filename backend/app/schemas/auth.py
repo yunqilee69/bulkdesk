@@ -1,16 +1,17 @@
-from pydantic import BaseModel, Field
+from pydantic import Field
 
+from app.schemas.common import ApiSchema
 
-class LoginRequest(BaseModel):
+class LoginRequest(ApiSchema):
     username: str = Field(..., min_length=1)
     password: str = Field(..., min_length=1)
 
 
-class TokenResponse(BaseModel):
+class TokenResponse(ApiSchema):
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
 
 
-class RefreshRequest(BaseModel):
+class RefreshRequest(ApiSchema):
     refresh_token: str

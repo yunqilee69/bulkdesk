@@ -30,6 +30,7 @@ import { uploadFile } from '@/services/upload';
 import {
   extractUploadedImageUrls,
   findProductImagePreviewIndex,
+  getProductListImageUrl,
   getProductImagePreviewUrl,
   MAX_PRODUCT_IMAGES,
   validateProductImage,
@@ -43,6 +44,11 @@ import {
 import type { MemberPriceRow } from './memberPrices';
 import { toPriceChartData } from './priceChart';
 import type { PriceChartPoint } from './priceChart';
+import {
+  productKeywordSearchConfig,
+  productListSearchConfig,
+  toProductListParams,
+} from './searchFilters';
 
 type ProductRecord = {
   id: string;
@@ -58,6 +64,8 @@ type ProductRecord = {
   standard_price: number;
   cost_price: number;
   image_urls?: string[];
+  available_quantity: number;
+  locked_quantity: number;
   status: string;
   description?: string;
 };
@@ -118,14 +126,55 @@ export default function ProductList() {
   }, []);
 
   const columns: ProColumns<ProductRecord>[] = [
-    { title: '商品名称', dataIndex: 'name' },
+    {
+      title: '图片',
+      dataIndex: 'image_urls',
+      width: 72,
+      search: false,
+      render: (_, record) => {
+        const imageUrl = getProductListImageUrl(record.image_urls);
+        return imageUrl ? (
+          <Image
+            alt={`${record.name} 图片`}
+            fallback="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mN88P/BfwAJhAPi5i8i7AAAAABJRU5ErkJggg=="
+            height={40}
+            preview={false}
+            src={imageUrl}
+            style={{ borderRadius: 4, objectFit: 'cover' }}
+            width={40}
+          />
+        ) : (
+          <span style={{ color: '#999' }}>暂无</span>
+        );
+      },
+    },
+    { title: '商品名称', dataIndex: 'name', search: false },
+    { title: '商品名称/简称', dataIndex: 'keyword', hideInTable: true, ...productKeywordSearchConfig },
     { title: '条形码', dataIndex: 'barcode' },
     { title: '分类', dataIndex: 'category_name', search: false },
+    {
+      title: '分类',
+      dataIndex: 'category_id',
+      hideInTable: true,
+      valueType: 'select',
+      fieldProps: { options: categories.map((item) => ({ label: item.name, value: item.id })) },
+    },
     { title: '品牌', dataIndex: 'brand_name', search: false },
+    {
+      title: '品牌',
+      dataIndex: 'brand_id',
+      hideInTable: true,
+      valueType: 'select',
+      fieldProps: { options: brands.map((item) => ({ label: item.name, value: item.id })) },
+    },
     { title: '规格说明', dataIndex: 'specification', search: false },
     { title: '单位', dataIndex: 'unit', search: false },
     { title: '标准售价', dataIndex: 'standard_price', valueType: 'money', search: false },
     { title: '成本价', dataIndex: 'cost_price', valueType: 'money', search: false },
+    { title: '售价范围', dataIndex: 'standard_price', hideInTable: true, valueType: 'digitRange' },
+    { title: '成本价范围', dataIndex: 'cost_price', hideInTable: true, valueType: 'digitRange' },
+    { title: '可销售数量', dataIndex: 'available_quantity', width: 110, search: false },
+    { title: '已锁定数量', dataIndex: 'locked_quantity', width: 110, search: false },
     {
       title: '销售状态',
       dataIndex: 'status',
@@ -338,15 +387,9 @@ export default function ProductList() {
       <ProTable<ProductRecord>
         actionRef={actionRef}
         columns={columns}
+        search={productListSearchConfig}
         request={async (params) => {
-          const response = await listProducts({
-            keyword: params.name,
-            barcode: params.barcode,
-            category_id: params.category_id,
-            status: params.status,
-            page: params.current,
-            page_size: params.pageSize,
-          });
+          const response = await listProducts(toProductListParams(params));
           return {
             data: response.data?.items ?? [],
             total: response.data?.total ?? 0,

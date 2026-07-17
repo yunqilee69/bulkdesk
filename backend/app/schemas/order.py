@@ -1,17 +1,18 @@
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from app.models.order import OrderStatus
+from app.schemas.common import ApiSchema
 
 
-class OrderItemCreate(BaseModel):
+class OrderItemCreate(ApiSchema):
     product_id: str
     quantity: int = Field(..., gt=0)
 
 
-class OrderCreate(BaseModel):
+class OrderCreate(ApiSchema):
     customer_id: str
     warehouse_id: str
     items: List[OrderItemCreate] = Field(..., min_length=1)
@@ -25,7 +26,7 @@ class OrderCreate(BaseModel):
         return self
 
 
-class OrderItemOut(BaseModel):
+class OrderItemOut(ApiSchema):
     id: str
     order_id: str
     product_id: str
@@ -43,7 +44,7 @@ class OrderItemOut(BaseModel):
         return str(v)
 
 
-class OrderStatusLogOut(BaseModel):
+class OrderStatusLogOut(ApiSchema):
     id: str
     order_id: str
     from_status: Optional[OrderStatus]
@@ -60,7 +61,7 @@ class OrderStatusLogOut(BaseModel):
         return str(v)
 
 
-class OrderOut(BaseModel):
+class OrderOut(ApiSchema):
     id: str
     order_no: str
     customer_id: str
@@ -86,7 +87,7 @@ class OrderOut(BaseModel):
         return str(v)
 
 
-class OrderActionRequest(BaseModel):
+class OrderActionRequest(ApiSchema):
     cancel_reason: str = Field(..., min_length=1, max_length=255)
 
     @field_validator("cancel_reason")

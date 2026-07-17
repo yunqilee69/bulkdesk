@@ -736,6 +736,8 @@ async def list_inventory(
             v = product_info["product"]
             brand = product_info.get("brand_name")
             out.product_info = f"{v.barcode} - {v.name}" + (f" [{brand}]" if brand else "")
+            out.warning_quantity = v.warning_quantity
+            out.product_image_url = (v.image_urls or [None])[0]
         items.append(out)
 
     return PaginatedResponse(items=items, total=total, page=page, page_size=page_size)

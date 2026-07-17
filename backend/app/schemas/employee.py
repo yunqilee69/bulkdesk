@@ -1,10 +1,11 @@
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import Field, field_validator
 import re
 
 from app.models.employee import EmployeeRole, EmployeeStatus
+from app.schemas.common import ApiSchema
 
 
 def _validate_password(v: str) -> str:
@@ -17,7 +18,7 @@ def _validate_password(v: str) -> str:
     return v
 
 
-class EmployeeCreate(BaseModel):
+class EmployeeCreate(ApiSchema):
     username: str = Field(..., min_length=1, max_length=50)
     password: str = Field(..., min_length=8)
     name: str = Field(..., min_length=1, max_length=100)
@@ -30,14 +31,14 @@ class EmployeeCreate(BaseModel):
         return _validate_password(v)
 
 
-class EmployeeUpdate(BaseModel):
+class EmployeeUpdate(ApiSchema):
     name: Optional[str] = Field(None, max_length=100)
     phone: Optional[str] = None
     role: Optional[EmployeeRole] = None
     status: Optional[EmployeeStatus] = None
 
 
-class PasswordChange(BaseModel):
+class PasswordChange(ApiSchema):
     old_password: str = Field(..., min_length=1)
     new_password: str = Field(..., min_length=8)
 
@@ -47,7 +48,7 @@ class PasswordChange(BaseModel):
         return _validate_password(v)
 
 
-class PasswordReset(BaseModel):
+class PasswordReset(ApiSchema):
     new_password: str = Field(..., min_length=8)
 
     @field_validator("new_password")
@@ -56,7 +57,7 @@ class PasswordReset(BaseModel):
         return _validate_password(v)
 
 
-class EmployeeOut(BaseModel):
+class EmployeeOut(ApiSchema):
     id: str
     username: str
     name: str

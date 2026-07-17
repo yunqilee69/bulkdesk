@@ -22,11 +22,11 @@ export default [
     path: '/inventory', name: 'inventory', icon: 'container',
     routes: [
       { path: '/inventory', redirect: '/inventory/stock' },
-      { path: '/inventory/suppliers', name: 'suppliers', access: 'canAdmin', component: './Inventory/suppliers' },
-      { path: '/inventory/warehouses', name: 'warehouses', access: 'canAdmin', component: './Inventory/warehouses' },
       { path: '/inventory/stock', name: 'stock', component: './Inventory/stock' },
       { path: '/inventory/operations', name: 'operations', component: './Inventory/operations' },
       { path: '/inventory/movements', name: 'movements', component: './Inventory/movements' },
+      { path: '/inventory/warehouses', name: 'warehouses', access: 'canAdmin', component: './Inventory/warehouses' },
+      { path: '/inventory/suppliers', name: 'suppliers', access: 'canAdmin', component: './Inventory/suppliers' },
     ],
   },
   {

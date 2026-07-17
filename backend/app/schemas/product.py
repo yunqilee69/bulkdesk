@@ -1,12 +1,13 @@
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from app.models.product import BrandStatus, CategoryStatus, PriceType, ProductStatus
+from app.schemas.common import ApiSchema
 
 
-class BrandCreate(BaseModel):
+class BrandCreate(ApiSchema):
     name: str = Field(..., min_length=1, max_length=100)
     logo_url: Optional[str] = Field(None, max_length=500)
     description: Optional[str] = Field(None, max_length=255)
@@ -14,7 +15,7 @@ class BrandCreate(BaseModel):
     status: BrandStatus = BrandStatus.active
 
 
-class BrandUpdate(BaseModel):
+class BrandUpdate(ApiSchema):
     name: Optional[str] = Field(None, max_length=100)
     logo_url: Optional[str] = Field(None, max_length=500)
     description: Optional[str] = Field(None, max_length=255)
@@ -33,12 +34,12 @@ class BrandOut(BrandCreate):
     def uuid_to_str(cls, value): return str(value)
 
 
-class CategoryCreate(BaseModel):
+class CategoryCreate(ApiSchema):
     name: str = Field(..., min_length=1, max_length=100)
     status: CategoryStatus = CategoryStatus.active
 
 
-class CategoryUpdate(BaseModel):
+class CategoryUpdate(ApiSchema):
     name: Optional[str] = Field(None, min_length=1, max_length=100)
     status: Optional[CategoryStatus] = None
 
@@ -54,12 +55,12 @@ class CategoryOut(CategoryCreate):
     def uuid_to_str(cls, value): return str(value)
 
 
-class MemberPriceBatchItem(BaseModel):
+class MemberPriceBatchItem(ApiSchema):
     level_id: str
     price: float = Field(..., ge=0)
 
 
-class ProductCreate(BaseModel):
+class ProductCreate(ApiSchema):
     name: str = Field(..., min_length=1, max_length=200)
     short_name: Optional[str] = Field(None, max_length=100)
     barcode: str = Field(..., min_length=1, max_length=50)
@@ -82,7 +83,7 @@ class ProductCreate(BaseModel):
         return self
 
 
-class ProductUpdate(BaseModel):
+class ProductUpdate(ApiSchema):
     name: Optional[str] = Field(None, min_length=1, max_length=200)
     short_name: Optional[str] = Field(None, max_length=100)
     barcode: Optional[str] = Field(None, min_length=1, max_length=50)
@@ -95,7 +96,11 @@ class ProductUpdate(BaseModel):
     status: Optional[ProductStatus] = None
 
 
-class ProductOut(BaseModel):
+class ProductWarningQuantityUpdate(ApiSchema):
+    warning_quantity: int = Field(..., ge=0)
+
+
+class ProductOut(ApiSchema):
     id: str
     name: str
     short_name: Optional[str]
@@ -109,6 +114,9 @@ class ProductOut(BaseModel):
     standard_price: float
     cost_price: float
     image_urls: Optional[list[str]]
+    warning_quantity: int = 0
+    available_quantity: int = 0
+    locked_quantity: int = 0
     description: Optional[str]
     status: ProductStatus
     created_at: datetime
@@ -119,8 +127,12 @@ class ProductOut(BaseModel):
     @classmethod
     def uuid_to_str(cls, value): return str(value) if value is not None else None
 
+    @field_validator("warning_quantity", mode="before")
+    @classmethod
+    def default_warning_quantity(cls, value): return 0 if value is None else value
 
-class PriceChangeRequest(BaseModel):
+
+class PriceChangeRequest(ApiSchema):
     price: float = Field(..., ge=0)
     reason: str = Field("", max_length=255)
 
@@ -129,13 +141,13 @@ class MemberPriceRequest(PriceChangeRequest):
     pass
 
 
-class MemberPriceItemOut(BaseModel):
+class MemberPriceItemOut(ApiSchema):
     level_id: str
     level_name: str
     price: Optional[float] = None
 
 
-class MemberPriceBatchUpdate(BaseModel):
+class MemberPriceBatchUpdate(ApiSchema):
     reason: Optional[str] = Field(None, max_length=255)
     items: list[MemberPriceBatchItem] = Field(..., min_length=1)
 
@@ -146,7 +158,7 @@ class MemberPriceBatchUpdate(BaseModel):
         return self
 
 
-class PriceChangeLogOut(BaseModel):
+class PriceChangeLogOut(ApiSchema):
     id: str
     product_id: str
     product_name: Optional[str] = None

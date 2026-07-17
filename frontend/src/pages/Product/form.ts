@@ -25,6 +25,10 @@ export function getProductImagePreviewUrl(file: UploadFile<UploadedImageResponse
   return file.response?.url ?? file.url;
 }
 
+export function getProductListImageUrl(imageUrls?: string[]) {
+  return imageUrls?.[0];
+}
+
 export function findProductImagePreviewIndex(
   fileList: UploadFile<UploadedImageResponse>[],
   file: UploadFile<UploadedImageResponse>,

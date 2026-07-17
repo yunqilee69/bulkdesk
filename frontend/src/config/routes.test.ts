@@ -36,4 +36,17 @@ describe('main menu routes', () => {
       component: './Employee',
     });
   });
+
+  it('keeps inventory child menus in the requested order', () => {
+    const inventoryRoute = routes.find((route) => route.path === '/inventory');
+
+    expect(inventoryRoute?.routes?.map((route) => route.path)).toEqual([
+      '/inventory',
+      '/inventory/stock',
+      '/inventory/operations',
+      '/inventory/movements',
+      '/inventory/warehouses',
+      '/inventory/suppliers',
+    ]);
+  });
 });
