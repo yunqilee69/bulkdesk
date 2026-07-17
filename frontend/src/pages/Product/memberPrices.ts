@@ -5,6 +5,25 @@ export type MemberPriceRow = {
   draftPrice?: number;
 };
 
+export type MemberLevelOption = {
+  id: string;
+  name: string;
+};
+
+export function createMemberPriceRows(levels: MemberLevelOption[]): MemberPriceRow[] {
+  return levels.map((level) => ({
+    level_id: level.id,
+    level_name: level.name,
+    draftPrice: undefined,
+  }));
+}
+
+export function getEnteredMemberPriceItems(rows: MemberPriceRow[]) {
+  return rows.flatMap((row) =>
+    row.draftPrice === undefined ? [] : [{ level_id: row.level_id, price: row.draftPrice }],
+  );
+}
+
 export function getChangedMemberPriceItems(rows: MemberPriceRow[]) {
   return rows.flatMap((row) => {
     if (row.draftPrice === undefined || row.draftPrice === row.price) return [];

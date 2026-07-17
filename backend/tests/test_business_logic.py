@@ -19,12 +19,12 @@ from app.models.inventory import (
 )
 from app.models.employee import Employee, EmployeeRole, EmployeeStatus
 from app.models.order import Order, OrderItem, OrderStatus
-from app.models.product import PriceChangeLog, Product
+from app.models.product import PriceChangeLog, PriceType, Product
 from app.schemas.dashboard import DashboardStats
 from app.schemas.inventory import StockInRequest, TransferRequest, WarehouseCreate
 from app.schemas.customer import CustomerLevelCreate
 from app.schemas.order import OrderActionRequest, OrderCreate, OrderItemCreate, OrderOut
-from app.schemas.product import MemberPriceBatchItem, MemberPriceBatchUpdate, PriceChangeLogOut, ProductCreate, ProductUpdate
+from app.schemas.product import MemberPriceBatchItem, MemberPriceBatchUpdate, PriceChangeLogOut, PriceChangeRequest, ProductCreate, ProductUpdate
 from app.services import dashboard_service, employee_service, inventory_service, order_service, product_service
 from app.api.v1 import upload as upload_api
 from app.api.v1 import product as product_api
@@ -134,6 +134,40 @@ def test_member_price_batch_rejects_duplicate_levels():
         )
 
 
+def test_product_price_reasons_are_optional():
+    product = ProductCreate(
+        name="测试商品",
+        barcode="6900000000001",
+        category_id=str(uuid.uuid4()),
+        unit="件",
+        standard_price=12.34,
+        cost_price=5.67,
+    )
+    price_change = PriceChangeRequest(price=13.5)
+
+    assert product.price_reason == ""
+    assert product.member_prices == []
+    assert price_change.reason == ""
+
+
+def test_product_create_rejects_duplicate_member_levels():
+    level_id = str(uuid.uuid4())
+
+    with pytest.raises(ValidationError, match="会员等级不能重复"):
+        ProductCreate(
+            name="测试商品",
+            barcode="6900000000001",
+            category_id=str(uuid.uuid4()),
+            unit="件",
+            standard_price=12.34,
+            cost_price=5.67,
+            member_prices=[
+                {"level_id": level_id, "price": 88},
+                {"level_id": level_id, "price": 78},
+            ],
+        )
+
+
 @pytest.mark.asyncio
 async def test_create_product_rejects_duplicate_barcode():
     request = ProductCreate(
@@ -149,6 +183,85 @@ async def test_create_product_rejects_duplicate_barcode():
 
     with pytest.raises(ValueError, match="条形码已存在"):
         await product_service.create_product(db, request)
+
+    assert db.added == []
+
+
+@pytest.mark.asyncio
+async def test_create_product_saves_member_prices_and_logs(monkeypatch):
+    category_id = str(uuid.uuid4())
+    normal_level = CustomerLevel(id=uuid.uuid4(), name="普通会员", min_spent=Decimal("0"))
+    gold_level = CustomerLevel(id=uuid.uuid4(), name="黄金会员", min_spent=Decimal("1000"))
+    request = ProductCreate(
+        name="测试商品",
+        barcode="6900000000001",
+        category_id=category_id,
+        unit="件",
+        standard_price=100,
+        cost_price=60,
+        member_prices=[
+            {"level_id": str(normal_level.id), "price": 95},
+            {"level_id": str(gold_level.id), "price": 88},
+        ],
+    )
+    db = QueueDb(
+        [
+            FakeResult(one=category_id),
+            FakeResult(one=None),
+            FakeResult(values=[normal_level, gold_level]),
+        ]
+    )
+
+    async def populated_product(_db, _product):
+        return "created-product"
+
+    monkeypatch.setattr(product_service, "_populate_product_out", populated_product)
+
+    result = await product_service.create_product(db, request, "admin")
+
+    products = [item for item in db.added if isinstance(item, Product)]
+    member_prices = [item for item in db.added if isinstance(item, MemberPrice)]
+    logs = [item for item in db.added if isinstance(item, PriceChangeLog)]
+    assert result == "created-product"
+    assert len(products) == 1
+    assert [(str(item.level_id), item.price) for item in member_prices] == [
+        (str(normal_level.id), 95),
+        (str(gold_level.id), 88),
+    ]
+    assert [(item.price_type, str(item.level_id) if item.level_id else None, item.new_value, item.reason) for item in logs] == [
+        (PriceType.standard_price, None, 100, ""),
+        (PriceType.cost_price, None, 60, ""),
+        (PriceType.member_price, str(normal_level.id), 95, ""),
+        (PriceType.member_price, str(gold_level.id), 88, ""),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_create_product_validates_member_levels_before_writing():
+    category_id = str(uuid.uuid4())
+    known_level = CustomerLevel(id=uuid.uuid4(), name="普通会员", min_spent=Decimal("0"))
+    request = ProductCreate(
+        name="测试商品",
+        barcode="6900000000001",
+        category_id=category_id,
+        unit="件",
+        standard_price=100,
+        cost_price=60,
+        member_prices=[
+            {"level_id": str(known_level.id), "price": 95},
+            {"level_id": str(uuid.uuid4()), "price": 88},
+        ],
+    )
+    db = QueueDb(
+        [
+            FakeResult(one=category_id),
+            FakeResult(one=None),
+            FakeResult(values=[known_level]),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="会员等级不存在"):
+        await product_service.create_product(db, request, "admin")
 
     assert db.added == []
 

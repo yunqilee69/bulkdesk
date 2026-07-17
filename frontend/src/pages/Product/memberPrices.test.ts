@@ -1,8 +1,38 @@
 import { describe, expect, it } from 'vitest';
 
-import { getChangedMemberPriceItems, getMemberPriceChangeState } from './memberPrices';
+import {
+  createMemberPriceRows,
+  getChangedMemberPriceItems,
+  getEnteredMemberPriceItems,
+  getMemberPriceChangeState,
+} from './memberPrices';
 
 describe('member price helpers', () => {
+  it('creates empty member price rows from customer levels', () => {
+    expect(
+      createMemberPriceRows([
+        { id: 'normal', name: '普通会员' },
+        { id: 'gold', name: '黄金会员' },
+      ]),
+    ).toEqual([
+      { level_id: 'normal', level_name: '普通会员', draftPrice: undefined },
+      { level_id: 'gold', level_name: '黄金会员', draftPrice: undefined },
+    ]);
+  });
+
+  it('submits only entered member prices and keeps zero as valid', () => {
+    expect(
+      getEnteredMemberPriceItems([
+        { level_id: 'normal', level_name: '普通会员', draftPrice: 0 },
+        { level_id: 'gold', level_name: '黄金会员', draftPrice: 88 },
+        { level_id: 'silver', level_name: '白银会员', draftPrice: undefined },
+      ]),
+    ).toEqual([
+      { level_id: 'normal', price: 0 },
+      { level_id: 'gold', price: 88 },
+    ]);
+  });
+
   it('identifies new and changed prices without requiring a reason', () => {
     expect(
       getChangedMemberPriceItems([

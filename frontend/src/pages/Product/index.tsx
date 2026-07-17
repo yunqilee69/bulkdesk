@@ -14,6 +14,7 @@ import { Button, Empty, Image, Input, InputNumber, message, Modal, Row, Col, Spa
 import type { UploadFile, UploadProps } from 'antd';
 import { useAccess } from '@umijs/max';
 import { useEffect, useRef, useState } from 'react';
+import { listAllLevels } from '@/services/customer';
 import {
   batchUpdateMemberPrices,
   changeProductPrice,
@@ -33,7 +34,12 @@ import {
   MAX_PRODUCT_IMAGES,
   validateProductImage,
 } from './form';
-import { getChangedMemberPriceItems, getMemberPriceChangeState } from './memberPrices';
+import {
+  createMemberPriceRows,
+  getChangedMemberPriceItems,
+  getEnteredMemberPriceItems,
+  getMemberPriceChangeState,
+} from './memberPrices';
 import type { MemberPriceRow } from './memberPrices';
 import { toPriceChartData } from './priceChart';
 import type { PriceChartPoint } from './priceChart';
@@ -91,6 +97,8 @@ export default function ProductList() {
   const actionRef = useRef<ActionType>(null);
   const [categories, setCategories] = useState<Option[]>([]);
   const [brands, setBrands] = useState<Option[]>([]);
+  const [memberLevels, setMemberLevels] = useState<Option[]>([]);
+  const [newProductMemberPriceRows, setNewProductMemberPriceRows] = useState<MemberPriceRow[]>([]);
   const [editing, setEditing] = useState<ProductRecord>();
   const [open, setOpen] = useState(false);
   const [imageFileList, setImageFileList] = useState<ProductImageFile[]>([]);
@@ -100,10 +108,11 @@ export default function ProductList() {
   const [priceOpen, setPriceOpen] = useState(false);
 
   useEffect(() => {
-    Promise.all([listAllCategories(), listAllBrands()])
-      .then(([categoryItems, brandItems]) => {
+    Promise.all([listAllCategories(), listAllBrands(), listAllLevels()])
+      .then(([categoryItems, brandItems, levelItems]) => {
         setCategories(categoryItems as Option[]);
         setBrands(brandItems as Option[]);
+        setMemberLevels(levelItems as Option[]);
       })
       .catch(() => message.error('基础数据加载失败'));
   }, []);
@@ -251,7 +260,45 @@ export default function ProductList() {
           </Col>
         </Row>
       )}
-      {!editing && <ProFormText name="price_reason" label="初始定价原因" rules={[{ required: true, message: '请填写初始定价原因' }]} />}
+      {!editing && (
+        <>
+          <ProFormText name="price_reason" label="初始定价原因（选填）" />
+          <ProForm.Item label="会员价格（选填）">
+            <Table<MemberPriceRow>
+              columns={[
+                { title: '会员等级', dataIndex: 'level_name' },
+                {
+                  title: '会员价',
+                  render: (_, row) => (
+                    <InputNumber
+                      min={0}
+                      precision={2}
+                      prefix="¥"
+                      suffix="元"
+                      style={{ width: '100%' }}
+                      value={row.draftPrice}
+                      onChange={(value) =>
+                        setNewProductMemberPriceRows((rows) =>
+                          rows.map((item) =>
+                            item.level_id === row.level_id
+                              ? { ...item, draftPrice: value ?? undefined }
+                              : item,
+                          ),
+                        )
+                      }
+                    />
+                  ),
+                },
+              ]}
+              dataSource={newProductMemberPriceRows}
+              locale={{ emptyText: '暂无会员等级' }}
+              pagination={false}
+              rowKey="level_id"
+              size="small"
+            />
+          </ProForm.Item>
+        </>
+      )}
       <ProForm.Item label="商品图片">
         <Upload
           accept="image/*"
@@ -316,6 +363,7 @@ export default function ProductList() {
                   onClick={() => {
                     setEditing(undefined);
                     setImageFileList([]);
+                    setNewProductMemberPriceRows(createMemberPriceRows(memberLevels));
                     setOpen(true);
                   }}
                 >
@@ -332,6 +380,9 @@ export default function ProductList() {
           const payload = {
             ...values,
             image_urls: extractUploadedImageUrls(imageFileList),
+            ...(!editing
+              ? { member_prices: getEnteredMemberPriceItems(newProductMemberPriceRows) }
+              : {}),
           };
           const response = editing
             ? await updateProduct(editing.id, payload)
@@ -350,6 +401,7 @@ export default function ProductList() {
             setImageFileList([]);
             setPreviewOpen(false);
             setPreviewItems([]);
+            setNewProductMemberPriceRows([]);
           }
         }}
         open={open}
@@ -419,10 +471,9 @@ function PriceEditor({ product, onSaved }: { product: ProductRecord; onSaved: ()
   }, [product]);
 
   const submit = async (kind: 'standard_price' | 'cost_price') => {
-    if (!reason.trim()) return message.warning('请填写调整原因');
     const price = kind === 'standard_price' ? standard : cost;
     if (price === undefined || price < 0) return message.warning('请输入有效价格');
-    const response = await changeProductPrice(product.id, kind, { price, reason });
+    const response = await changeProductPrice(product.id, kind, { price, reason: reason.trim() });
     if (response.code === 0) {
       message.success('价格已调整');
       setReason('');
@@ -462,7 +513,7 @@ function PriceEditor({ product, onSaved }: { product: ProductRecord; onSaved: ()
   };
 
   return (
-    <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+    <Space orientation="vertical" size="middle" style={{ width: '100%' }}>
       <span>标准售价</span>
       <Space.Compact style={{ width: '100%' }}>
         <InputNumber

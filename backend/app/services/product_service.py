@@ -54,9 +54,34 @@ async def create_product(db: AsyncSession, req: ProductCreate, operator_name: Op
     if not (await db.execute(select(Category.id).where(Category.id == req.category_id, Category.status == "active"))).scalar_one_or_none(): raise ValueError("分类不存在或已停用")
     if req.brand_id and not (await db.execute(select(Brand.id).where(Brand.id == req.brand_id))).scalar_one_or_none(): raise ValueError("品牌不存在")
     if (await db.execute(select(Product.id).where(Product.barcode == req.barcode))).scalar_one_or_none(): raise ValueError("条形码已存在")
-    data = req.model_dump(exclude={"price_reason"}); product = Product(**data); db.add(product); await db.flush()
-    db.add_all([PriceChangeLog(product_id=product.id, price_type=PriceType.standard_price, old_value=None, new_value=product.standard_price, reason=req.price_reason, operator_name=operator_name), PriceChangeLog(product_id=product.id, price_type=PriceType.cost_price, old_value=None, new_value=product.cost_price, reason=req.price_reason, operator_name=operator_name)])
-    await db.flush(); return await _populate_product_out(db, product)
+    if req.member_prices:
+        level_ids = [item.level_id for item in req.member_prices]
+        levels = (
+            await db.execute(select(CustomerLevel).where(CustomerLevel.id.in_(level_ids)))
+        ).scalars().all()
+        if {str(level.id) for level in levels} != set(level_ids):
+            raise ValueError("会员等级不存在")
+
+    data = req.model_dump(exclude={"price_reason", "member_prices"})
+    product = Product(**data)
+    db.add(product)
+    await db.flush()
+
+    member_prices = [
+        MemberPrice(product_id=product.id, level_id=item.level_id, price=item.price)
+        for item in req.member_prices
+    ]
+    logs = [
+        PriceChangeLog(product_id=product.id, price_type=PriceType.standard_price, old_value=None, new_value=product.standard_price, reason=req.price_reason, operator_name=operator_name),
+        PriceChangeLog(product_id=product.id, price_type=PriceType.cost_price, old_value=None, new_value=product.cost_price, reason=req.price_reason, operator_name=operator_name),
+        *[
+            PriceChangeLog(product_id=product.id, price_type=PriceType.member_price, level_id=item.level_id, old_value=None, new_value=item.price, reason=req.price_reason, operator_name=operator_name)
+            for item in req.member_prices
+        ],
+    ]
+    db.add_all([*member_prices, *logs])
+    await db.flush()
+    return await _populate_product_out(db, product)
 
 async def list_products(db: AsyncSession, page=1, page_size=20, keyword: Optional[str] = None, category_id: Optional[str] = None, barcode: Optional[str] = None, status: Optional[ProductStatus] = None):
     query = select(Product); count = select(func.count()).select_from(Product)

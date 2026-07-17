@@ -54,6 +54,11 @@ class CategoryOut(CategoryCreate):
     def uuid_to_str(cls, value): return str(value)
 
 
+class MemberPriceBatchItem(BaseModel):
+    level_id: str
+    price: float = Field(..., ge=0)
+
+
 class ProductCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
     short_name: Optional[str] = Field(None, max_length=100)
@@ -64,10 +69,17 @@ class ProductCreate(BaseModel):
     unit: str = Field(..., min_length=1, max_length=20)
     standard_price: float = Field(..., ge=0)
     cost_price: float = Field(..., ge=0)
-    price_reason: str = Field(..., min_length=1, max_length=255)
+    price_reason: str = Field("", max_length=255)
+    member_prices: list[MemberPriceBatchItem] = Field(default_factory=list)
     image_urls: Optional[list[str]] = None
     description: Optional[str] = None
     status: ProductStatus = ProductStatus.active
+
+    @model_validator(mode="after")
+    def unique_member_price_levels(self):
+        if len({item.level_id for item in self.member_prices}) != len(self.member_prices):
+            raise ValueError("会员等级不能重复")
+        return self
 
 
 class ProductUpdate(BaseModel):
@@ -110,7 +122,7 @@ class ProductOut(BaseModel):
 
 class PriceChangeRequest(BaseModel):
     price: float = Field(..., ge=0)
-    reason: str = Field(..., min_length=1, max_length=255)
+    reason: str = Field("", max_length=255)
 
 
 class MemberPriceRequest(PriceChangeRequest):
@@ -121,11 +133,6 @@ class MemberPriceItemOut(BaseModel):
     level_id: str
     level_name: str
     price: Optional[float] = None
-
-
-class MemberPriceBatchItem(BaseModel):
-    level_id: str
-    price: float = Field(..., ge=0)
 
 
 class MemberPriceBatchUpdate(BaseModel):
