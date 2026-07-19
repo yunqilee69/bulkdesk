@@ -5,12 +5,14 @@ from app.core.database import get_db
 from app.core.deps import CurrentUser
 from app.models.order import OrderStatus
 from app.schemas.common import PaginatedResponse, ResponseBase
-from app.schemas.order import OrderActionRequest, OrderCreate, OrderOut
+from app.schemas.order import OrderActionRequest, OrderCreate, OrderOut, OrderShippingOptionsOut, OrderShipRequest
 from app.services.order_service import (
     create_order,
     get_order,
+    get_shipping_options,
     list_orders,
     transition_order,
+    update_shipping_allocations,
 )
 
 router = APIRouter(prefix="/orders", tags=["Order"])
@@ -56,15 +58,36 @@ async def get(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
 
 
-@router.put("/{order_id}/ship", response_model=ResponseBase[OrderOut])
-async def ship(
+@router.get(
+    "/{order_id}/shipping-options",
+    response_model=ResponseBase[OrderShippingOptionsOut],
+)
+async def shipping_options(
     order_id: str,
     current_user: CurrentUser = None,
     db: AsyncSession = Depends(get_db),
 ):
     try:
+        return ResponseBase(data=await get_shipping_options(db, order_id))
+    except ValueError as e:
+        status_code = (
+            status.HTTP_404_NOT_FOUND
+            if str(e) == "订单不存在"
+            else status.HTTP_400_BAD_REQUEST
+        )
+        raise HTTPException(status_code=status_code, detail=str(e))
+
+
+@router.put("/{order_id}/start-shipping", response_model=ResponseBase[OrderOut])
+async def start_shipping(
+    order_id: str,
+    req: OrderShipRequest,
+    current_user: CurrentUser = None,
+    db: AsyncSession = Depends(get_db),
+):
+    try:
         order = await transition_order(
-            db, order_id, OrderStatus.shipped, current_user.username
+            db, order_id, OrderStatus.shipping, current_user.username, ship_request=req
         )
         order_out = await get_order(db, str(order.id))
         return ResponseBase(data=order_out)
@@ -72,15 +95,46 @@ async def ship(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
 
-@router.put("/{order_id}/confirm-payment", response_model=ResponseBase[OrderOut])
-async def confirm_payment(
+@router.put("/{order_id}/shipping-allocations", response_model=ResponseBase[OrderOut])
+async def adjust_shipping_allocations(
+    order_id: str,
+    req: OrderShipRequest,
+    current_user: CurrentUser = None,
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        order = await update_shipping_allocations(db, order_id, req)
+        order_out = await get_order(db, str(order.id))
+        return ResponseBase(data=order_out)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@router.put("/{order_id}/stock-out", response_model=ResponseBase[OrderOut])
+async def stock_out(
     order_id: str,
     current_user: CurrentUser = None,
     db: AsyncSession = Depends(get_db),
 ):
     try:
         order = await transition_order(
-            db, order_id, OrderStatus.paid, current_user.username
+            db, order_id, OrderStatus.stocked_out, current_user.username
+        )
+        order_out = await get_order(db, str(order.id))
+        return ResponseBase(data=order_out)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@router.put("/{order_id}/deliver", response_model=ResponseBase[OrderOut])
+async def deliver(
+    order_id: str,
+    current_user: CurrentUser = None,
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        order = await transition_order(
+            db, order_id, OrderStatus.delivered_unpaid, current_user.username
         )
         order_out = await get_order(db, str(order.id))
         return ResponseBase(data=order_out)

@@ -27,6 +27,8 @@ class MovementType(str, enum.Enum):
     stocktake_adjustment = "stocktake_adjustment"
     order_deduction = "order_deduction"
     order_return = "order_return"
+    customer_return_in = "customer_return_in"
+    customer_return_void_out = "customer_return_void_out"
 
 
 class SupplierStatus(str, enum.Enum):

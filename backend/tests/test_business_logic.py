@@ -18,7 +18,14 @@ from app.models.inventory import (
     WarehouseStatus,
 )
 from app.models.employee import Employee, EmployeeRole, EmployeeStatus
-from app.models.order import Order, OrderItem, OrderStatus
+from app.models.order import (
+    Order,
+    OrderInventoryAllocation,
+    OrderInventoryAllocationStatus,
+    OrderItem,
+    OrderStatus,
+)
+from app.models import order as order_models
 from app.models.product import PriceChangeLog, PriceType, Product, ProductStatus
 from app.schemas.dashboard import DashboardStats
 from app.schemas.inventory import (
@@ -28,7 +35,15 @@ from app.schemas.inventory import (
     WarehouseCreate,
 )
 from app.schemas.customer import CustomerLevelCreate
-from app.schemas.order import OrderActionRequest, OrderCreate, OrderItemCreate, OrderOut
+from app.schemas.order import (
+    OrderActionRequest,
+    OrderCreate,
+    OrderItemCreate,
+    OrderOut,
+    OrderShipmentAllocation,
+    OrderShipRequest,
+)
+from app.schemas import order as order_schemas
 from app.schemas.product import (
     MemberPriceBatchItem,
     MemberPriceBatchUpdate,
@@ -102,10 +117,10 @@ class QueueDb:
 
 
 class CreateOrderDb(QueueDb):
-    def __init__(self, customer, inventory, product, level, member_price=None):
+    def __init__(self, customer, inventories, product, level, member_price=None):
         super().__init__()
         self.customer = customer
-        self.inventory = inventory
+        self.inventories = inventories if isinstance(inventories, list) else [inventories]
         self.product = product
         self.level = level
         self.member_price = member_price
@@ -116,7 +131,7 @@ class CreateOrderDb(QueueDb):
         if "FROM customers" in sql:
             return FakeResult(one=self.customer)
         if "FROM inventory" in sql:
-            return FakeResult(one=self.inventory)
+            return FakeResult(values=[(inventory, index == 0) for index, inventory in enumerate(self.inventories)])
         if "FROM products" in sql:
             return FakeResult(one=self.product)
         if "FROM member_prices" in sql:
@@ -702,7 +717,6 @@ async def test_create_order_uses_product_price_without_member_price():
         db,
         OrderCreate(
             customer_id=str(customer.id),
-            warehouse_id=str(inventory.warehouse_id),
             items=[OrderItemCreate(product_id=str(product.id), quantity=1)],
         ),
         operator="admin",
@@ -750,7 +764,6 @@ async def test_create_order_uses_exact_member_price():
         db,
         OrderCreate(
             customer_id=str(customer.id),
-            warehouse_id=str(inventory.warehouse_id),
             items=[OrderItemCreate(product_id=str(product.id), quantity=1)],
         ),
         operator="admin",
@@ -769,7 +782,6 @@ def test_order_create_rejects_duplicate_products():
     with pytest.raises(ValidationError, match="同一商品"):
         OrderCreate(
             customer_id=str(uuid.uuid4()),
-            warehouse_id=str(uuid.uuid4()),
             items=[
                 OrderItemCreate(product_id=product_id, quantity=1),
                 OrderItemCreate(product_id=product_id, quantity=2),
@@ -777,9 +789,99 @@ def test_order_create_rejects_duplicate_products():
         )
 
 
+def test_order_contract_does_not_expose_warehouse():
+    assert "warehouse_id" not in OrderCreate.model_fields
+    assert "warehouse_id" not in OrderOut.model_fields
+
+
+def test_order_contract_exposes_shipper_for_audit():
+    assert {status.value for status in OrderStatus} == {
+        "placed",
+        "shipping",
+        "stocked_out",
+        "delivered_unpaid",
+        "completed",
+        "cancelled",
+    }
+    expected_fields = {
+        "shipping_started_at",
+        "shipping_started_by",
+        "stock_out_at",
+        "stock_out_by",
+        "delivered_at",
+        "delivered_by",
+        "paid_at",
+        "paid_by",
+        "cancelled_at",
+        "cancelled_by",
+    }
+    assert expected_fields.issubset(Order.__table__.columns.keys())
+    assert expected_fields.issubset(OrderOut.model_fields)
+    assert "shipped_at" not in Order.__table__.columns
+    assert "shipped_by" not in Order.__table__.columns
+
+
+def test_order_inventory_allocation_model_tracks_warehouse_quantity():
+    allocation_model = getattr(order_models, "OrderInventoryAllocation", None)
+
+    assert allocation_model is not None
+    assert allocation_model.__tablename__ == "order_inventory_allocations"
+    assert {
+        "order_id",
+        "order_item_id",
+        "product_id",
+        "warehouse_id",
+        "quantity",
+        "status",
+    }.issubset(allocation_model.__table__.columns.keys())
+
+
+def test_order_ship_request_rejects_duplicate_item_warehouse_allocations():
+    request_model = getattr(order_schemas, "OrderShipRequest", None)
+    allocation_model = getattr(order_schemas, "OrderShipmentAllocation", None)
+
+    assert request_model is not None
+    assert allocation_model is not None
+    order_item_id = str(uuid.uuid4())
+    warehouse_id = str(uuid.uuid4())
+    with pytest.raises(ValidationError, match="重复"):
+        request_model(
+            allocations=[
+                allocation_model(
+                    order_item_id=order_item_id,
+                    warehouse_id=warehouse_id,
+                    quantity=1,
+                ),
+                allocation_model(
+                    order_item_id=order_item_id,
+                    warehouse_id=warehouse_id,
+                    quantity=2,
+                ),
+            ]
+        )
+
+
 def test_cancel_requires_non_blank_reason():
     with pytest.raises(ValidationError):
         OrderActionRequest(cancel_reason="   ")
+
+
+def test_order_fulfillment_routes_match_state_machine():
+    order_put_paths = {
+        route.path
+        for route in app.routes
+        if route.path.startswith("/api/v1/orders/")
+        and "PUT" in getattr(route, "methods", set())
+    }
+
+    assert order_put_paths == {
+        "/api/v1/orders/{order_id}/start-shipping",
+        "/api/v1/orders/{order_id}/shipping-allocations",
+        "/api/v1/orders/{order_id}/stock-out",
+        "/api/v1/orders/{order_id}/deliver",
+        "/api/v1/orders/{order_id}/complete",
+        "/api/v1/orders/{order_id}/cancel",
+    }
 
 
 @pytest.mark.asyncio
@@ -815,7 +917,6 @@ async def test_create_order_locks_inventory_rows():
         db,
         OrderCreate(
             customer_id=str(customer.id),
-            warehouse_id=str(inventory.warehouse_id),
             items=[OrderItemCreate(product_id=str(product.id), quantity=1)],
         ),
         operator="admin",
@@ -826,12 +927,135 @@ async def test_create_order_locks_inventory_rows():
 
 
 @pytest.mark.asyncio
+async def test_create_order_splits_and_locks_inventory_across_warehouses():
+    level_id = uuid.uuid4()
+    customer = Customer(
+        id=uuid.uuid4(),
+        name="客户",
+        contact_name="联系人",
+        contact_phone="13800000000",
+        level_id=level_id,
+    )
+    level = CustomerLevel(id=level_id, name="普通会员", min_spent=Decimal("0"))
+    product = Product(
+        id=uuid.uuid4(),
+        short_name="测试商品",
+        barcode="6900000000001",
+        category_id=uuid.uuid4(),
+        unit="件",
+        standard_price=Decimal("100.00"),
+        cost_price=Decimal("50.00"),
+    )
+    default_inventory = Inventory(
+        id=uuid.uuid4(),
+        product_id=product.id,
+        warehouse_id=uuid.uuid4(),
+        quantity=2,
+        locked=0,
+    )
+    secondary_inventory = Inventory(
+        id=uuid.uuid4(),
+        product_id=product.id,
+        warehouse_id=uuid.uuid4(),
+        quantity=5,
+        locked=0,
+    )
+    db = CreateOrderDb(
+        customer,
+        [default_inventory, secondary_inventory],
+        product,
+        level,
+    )
+
+    await order_service.create_order(
+        db,
+        OrderCreate(
+            customer_id=str(customer.id),
+            items=[OrderItemCreate(product_id=str(product.id), quantity=5)],
+        ),
+        operator="admin",
+    )
+
+    allocations = [
+        item for item in db.added if isinstance(item, OrderInventoryAllocation)
+    ]
+    assert default_inventory.locked == 2
+    assert secondary_inventory.locked == 3
+    assert [
+        (allocation.warehouse_id, allocation.quantity, allocation.status)
+        for allocation in allocations
+    ] == [
+        (
+            default_inventory.warehouse_id,
+            2,
+            OrderInventoryAllocationStatus.reserved,
+        ),
+        (
+            secondary_inventory.warehouse_id,
+            3,
+            OrderInventoryAllocationStatus.reserved,
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_create_order_does_not_lock_partial_inventory_when_total_is_insufficient():
+    level_id = uuid.uuid4()
+    customer = Customer(
+        id=uuid.uuid4(),
+        name="客户",
+        contact_name="联系人",
+        contact_phone="13800000000",
+        level_id=level_id,
+    )
+    level = CustomerLevel(id=level_id, name="普通会员", min_spent=Decimal("0"))
+    product = Product(
+        id=uuid.uuid4(),
+        short_name="测试商品",
+        barcode="6900000000001",
+        category_id=uuid.uuid4(),
+        unit="件",
+        standard_price=Decimal("100.00"),
+        cost_price=Decimal("50.00"),
+    )
+    inventories = [
+        Inventory(
+            id=uuid.uuid4(),
+            product_id=product.id,
+            warehouse_id=uuid.uuid4(),
+            quantity=2,
+            locked=0,
+        ),
+        Inventory(
+            id=uuid.uuid4(),
+            product_id=product.id,
+            warehouse_id=uuid.uuid4(),
+            quantity=1,
+            locked=0,
+        ),
+    ]
+    db = CreateOrderDb(customer, inventories, product, level)
+
+    with pytest.raises(ValueError, match="可用库存不足"):
+        await order_service.create_order(
+            db,
+            OrderCreate(
+                customer_id=str(customer.id),
+                items=[OrderItemCreate(product_id=str(product.id), quantity=4)],
+            ),
+            operator="admin",
+        )
+
+    assert [inventory.locked for inventory in inventories] == [0, 0]
+    assert not any(isinstance(item, Order) for item in db.added)
+
+
+@pytest.mark.asyncio
 async def test_cancel_locks_order_and_persists_reason(monkeypatch):
     order = Order(
         id=uuid.uuid4(),
         order_no="ORD1",
         customer_id=uuid.uuid4(),
-        warehouse_id=uuid.uuid4(),
         total_amount=Decimal("20.00"),
         status=OrderStatus.placed,
     )
@@ -852,6 +1076,7 @@ async def test_cancel_locks_order_and_persists_reason(monkeypatch):
 
     assert "FOR UPDATE" in db.statements[0]
     assert order.cancel_reason == "客户撤单"
+    assert order.cancelled_by == "admin"
 
 
 def test_customer_model_contains_order_statistics():
@@ -859,7 +1084,7 @@ def test_customer_model_contains_order_statistics():
 
 
 @pytest.mark.asyncio
-async def test_complete_order_updates_customer_statistics(monkeypatch):
+async def test_complete_order_updates_customer_statistics_without_adjusting_level():
     customer = Customer(
         id=uuid.uuid4(),
         name="客户",
@@ -874,54 +1099,20 @@ async def test_complete_order_updates_customer_statistics(monkeypatch):
         id=uuid.uuid4(),
         order_no="ORD1",
         customer_id=customer.id,
-        warehouse_id=uuid.uuid4(),
         total_amount=Decimal("30.00"),
-        status=OrderStatus.paid,
+        status=OrderStatus.delivered_unpaid,
         created_at=created_at,
     )
     db = QueueDb([FakeResult(one=customer)])
-
-    async def skip_level_check(*_args):
-        return None
-
-    monkeypatch.setattr(order_service, "_check_level_up", skip_level_check)
+    original_level_id = customer.level_id
 
     await order_service._complete_order(db, order)
 
     assert customer.total_spent == Decimal("50.00")
     assert customer.order_count == 3
     assert customer.last_order_at == created_at
-
-
-@pytest.mark.asyncio
-async def test_level_check_never_downgrades_customer():
-    platinum = CustomerLevel(
-        id=uuid.uuid4(), name="铂金", min_spent=Decimal("1000")
-    )
-    normal = CustomerLevel(id=uuid.uuid4(), name="普通", min_spent=Decimal("0"))
-    customer = Customer(
-        id=uuid.uuid4(),
-        name="客户",
-        contact_name="联系人",
-        contact_phone="13800000000",
-        level_id=platinum.id,
-    )
-
-    class LevelDb(QueueDb):
-        async def execute(self, statement):
-            sql = str(statement)
-            self.statements.append(sql)
-            if "FROM orders" in sql:
-                return FakeResult(scalar=Decimal("10"))
-            if "customer_levels.id" in sql and "ORDER BY" not in sql:
-                return FakeResult(one=platinum)
-            if "FROM customer_levels" in sql:
-                return FakeResult(one=normal)
-            raise AssertionError(f"Unexpected query: {sql}")
-
-    await order_service._check_level_up(LevelDb(), customer, Decimal("10"))
-
-    assert customer.level_id == platinum.id
+    assert customer.level_id == original_level_id
+    assert not any(isinstance(item, LevelChangeLog) for item in db.added)
 
 
 def test_order_output_contains_page_contract():
@@ -1145,8 +1336,8 @@ async def test_product_list_aggregates_available_quantity_across_warehouses():
 
 
 @pytest.mark.asyncio
-async def test_ship_fails_if_inventory_row_is_missing():
-    order = Order(id=uuid.uuid4(), order_no="ORD1", warehouse_id=uuid.uuid4())
+async def test_shipping_reallocation_fails_if_inventory_row_is_missing():
+    order = Order(id=uuid.uuid4(), order_no="ORD1")
     item = OrderItem(
         id=uuid.uuid4(),
         order_id=order.id,
@@ -1157,15 +1348,21 @@ async def test_ship_fails_if_inventory_row_is_missing():
         unit_price=Decimal("10.00"),
         subtotal=Decimal("20.00"),
     )
-    db = QueueDb([FakeResult(values=[item]), FakeResult(one=None)])
+    warehouse_id = uuid.uuid4()
+    allocation = OrderInventoryAllocation(
+        id=uuid.uuid4(), order_id=order.id, order_item_id=item.id,
+        product_id=item.product_id, warehouse_id=warehouse_id, quantity=2,
+        status=OrderInventoryAllocationStatus.reserved,
+    )
+    db = QueueDb([FakeResult(values=[item]), FakeResult(values=[allocation]), FakeResult(values=[])])
 
-    with pytest.raises(ValueError, match="Inventory not found"):
-        await order_service._deduct_inventory_on_ship(db, order)
+    with pytest.raises(ValueError, match="没有库存"):
+        await order_service._reallocate_reserved_inventory(db, order, OrderShipRequest(allocations=[OrderShipmentAllocation(order_item_id=str(item.id), warehouse_id=str(warehouse_id), quantity=2)]))
 
 
 @pytest.mark.asyncio
-async def test_ship_fails_if_locked_inventory_is_less_than_order_quantity():
-    order = Order(id=uuid.uuid4(), order_no="ORD1", warehouse_id=uuid.uuid4())
+async def test_shipping_reallocation_fails_if_locked_inventory_is_less_than_reservation():
+    order = Order(id=uuid.uuid4(), order_no="ORD1")
     item = OrderItem(
         id=uuid.uuid4(),
         order_id=order.id,
@@ -1176,22 +1373,245 @@ async def test_ship_fails_if_locked_inventory_is_less_than_order_quantity():
         unit_price=Decimal("10.00"),
         subtotal=Decimal("30.00"),
     )
+    warehouse_id = uuid.uuid4()
     inventory = Inventory(
         id=uuid.uuid4(),
         product_id=item.product_id,
-        warehouse_id=order.warehouse_id,
+        warehouse_id=warehouse_id,
         quantity=5,
         locked=1,
     )
-    db = QueueDb([FakeResult(values=[item]), FakeResult(one=inventory)])
+    allocation = OrderInventoryAllocation(
+        id=uuid.uuid4(), order_id=order.id, order_item_id=item.id,
+        product_id=item.product_id, warehouse_id=warehouse_id, quantity=3,
+        status=OrderInventoryAllocationStatus.reserved,
+    )
+    db = QueueDb([FakeResult(values=[item]), FakeResult(values=[allocation]), FakeResult(values=[inventory])])
 
-    with pytest.raises(ValueError, match="Locked inventory"):
-        await order_service._deduct_inventory_on_ship(db, order)
+    with pytest.raises(ValueError, match="锁定库存不足"):
+        await order_service._reallocate_reserved_inventory(db, order, OrderShipRequest(allocations=[OrderShipmentAllocation(order_item_id=str(item.id), warehouse_id=str(warehouse_id), quantity=3)]))
 
 
 @pytest.mark.asyncio
-async def test_cancel_placed_order_releases_locked_inventory_and_records_movement():
-    order = Order(id=uuid.uuid4(), order_no="ORD1", warehouse_id=uuid.uuid4())
+async def test_shipping_reallocates_reserved_inventory_without_deducting_quantity():
+    order = Order(
+        id=uuid.uuid4(),
+        order_no="ORD1",
+        customer_id=uuid.uuid4(),
+        total_amount=Decimal("50.00"),
+        status=OrderStatus.placed,
+    )
+    item = OrderItem(
+        id=uuid.uuid4(),
+        order_id=order.id,
+        product_id=uuid.uuid4(),
+        barcode="商品-001",
+        product_name="测试商品",
+        quantity=5,
+        unit_price=Decimal("10.00"),
+        subtotal=Decimal("50.00"),
+    )
+    first_warehouse_id = uuid.uuid4()
+    second_warehouse_id = uuid.uuid4()
+    existing = OrderInventoryAllocation(
+        id=uuid.uuid4(),
+        order_id=order.id,
+        order_item_id=item.id,
+        product_id=item.product_id,
+        warehouse_id=first_warehouse_id,
+        quantity=5,
+        status=OrderInventoryAllocationStatus.reserved,
+    )
+    first_inventory = Inventory(
+        id=uuid.uuid4(),
+        product_id=item.product_id,
+        warehouse_id=first_warehouse_id,
+        quantity=10,
+        locked=5,
+    )
+    second_inventory = Inventory(
+        id=uuid.uuid4(),
+        product_id=item.product_id,
+        warehouse_id=second_warehouse_id,
+        quantity=4,
+        locked=0,
+    )
+    db = QueueDb(
+        [
+            FakeResult(values=[item]),
+            FakeResult(values=[existing]),
+            FakeResult(values=[first_inventory, second_inventory]),
+        ]
+    )
+
+    await order_service._reallocate_reserved_inventory(
+        db,
+        order,
+        OrderShipRequest(
+            allocations=[
+                OrderShipmentAllocation(
+                    order_item_id=str(item.id),
+                    warehouse_id=str(first_warehouse_id),
+                    quantity=2,
+                ),
+                OrderShipmentAllocation(
+                    order_item_id=str(item.id),
+                    warehouse_id=str(second_warehouse_id),
+                    quantity=3,
+                ),
+            ]
+        ),
+    )
+
+    created_allocations = [
+        allocation
+        for allocation in db.added
+        if isinstance(allocation, OrderInventoryAllocation) and allocation is not existing
+    ]
+    movements = [item for item in db.added if isinstance(item, InventoryMovement)]
+    assert (first_inventory.quantity, first_inventory.locked) == (10, 2)
+    assert (second_inventory.quantity, second_inventory.locked) == (4, 3)
+    assert (existing.quantity, existing.status) == (
+        2,
+        OrderInventoryAllocationStatus.reserved,
+    )
+    assert [
+        (allocation.warehouse_id, allocation.quantity, allocation.status)
+        for allocation in created_allocations
+    ] == [
+        (
+            second_warehouse_id,
+            3,
+            OrderInventoryAllocationStatus.reserved,
+        )
+    ]
+    assert movements == []
+
+
+@pytest.mark.asyncio
+async def test_stock_out_deducts_current_reservations_and_creates_warehouse_movements():
+    order = Order(id=uuid.uuid4(), order_no="ORD1", customer_id=uuid.uuid4(), total_amount=Decimal("50.00"), status=OrderStatus.shipping)
+    item = OrderItem(
+        id=uuid.uuid4(), order_id=order.id, product_id=uuid.uuid4(), barcode="商品-001",
+        product_name="测试商品", quantity=5, unit_price=Decimal("10.00"), subtotal=Decimal("50.00"),
+    )
+    first_warehouse_id = uuid.uuid4()
+    second_warehouse_id = uuid.uuid4()
+    allocations = [
+        OrderInventoryAllocation(
+            id=uuid.uuid4(), order_id=order.id, order_item_id=item.id, product_id=item.product_id,
+            warehouse_id=first_warehouse_id, quantity=2, status=OrderInventoryAllocationStatus.reserved,
+        ),
+        OrderInventoryAllocation(
+            id=uuid.uuid4(), order_id=order.id, order_item_id=item.id, product_id=item.product_id,
+            warehouse_id=second_warehouse_id, quantity=3, status=OrderInventoryAllocationStatus.reserved,
+        ),
+    ]
+    inventories = [
+        Inventory(id=uuid.uuid4(), product_id=item.product_id, warehouse_id=first_warehouse_id, quantity=10, locked=2),
+        Inventory(id=uuid.uuid4(), product_id=item.product_id, warehouse_id=second_warehouse_id, quantity=4, locked=3),
+    ]
+    db = QueueDb([
+        FakeResult(values=[item]),
+        FakeResult(values=allocations),
+        FakeResult(values=inventories),
+        FakeResult(scalar=0),
+        FakeResult(scalar=0),
+    ])
+
+    await order_service._deduct_reserved_inventory(db, order)
+
+    assert [(inventory.quantity, inventory.locked) for inventory in inventories] == [(8, 0), (1, 0)]
+    assert all(allocation.status == OrderInventoryAllocationStatus.shipped for allocation in allocations)
+    movements = [added for added in db.added if isinstance(added, InventoryMovement)]
+    assert sorted(movement.warehouse_id for movement in movements) == sorted([first_warehouse_id, second_warehouse_id])
+
+
+@pytest.mark.asyncio
+async def test_start_shipping_records_operator_and_keeps_inventory_reserved(monkeypatch):
+    order = Order(
+        id=uuid.uuid4(),
+        order_no="ORD1",
+        customer_id=uuid.uuid4(),
+        total_amount=Decimal("10.00"),
+        status=OrderStatus.placed,
+    )
+    db = QueueDb([FakeResult(one=order)])
+
+    reallocated = []
+
+    async def reallocate_inventory(_db, current_order, request):
+        reallocated.append((current_order, request))
+        return None
+
+    monkeypatch.setattr(
+        order_service,
+        "_reallocate_reserved_inventory",
+        reallocate_inventory,
+        raising=False,
+    )
+
+    request = OrderShipRequest(
+        allocations=[
+            OrderShipmentAllocation(
+                order_item_id=str(uuid.uuid4()),
+                warehouse_id=str(uuid.uuid4()),
+                quantity=1,
+            )
+        ]
+    )
+
+    await order_service.transition_order(
+        db,
+        str(order.id),
+        OrderStatus.shipping,
+        "shipper-user",
+        ship_request=request,
+    )
+
+    assert reallocated == [(order, request)]
+    assert order.shipping_started_by == "shipper-user"
+    assert order.shipping_started_at is not None
+
+
+@pytest.mark.asyncio
+async def test_stock_out_delivery_and_payment_record_each_operator(monkeypatch):
+    order = Order(
+        id=uuid.uuid4(),
+        order_no="ORD1",
+        customer_id=uuid.uuid4(),
+        total_amount=Decimal("10.00"),
+        status=OrderStatus.shipping,
+    )
+    db = QueueDb([FakeResult(one=order), FakeResult(one=order), FakeResult(one=order), FakeResult(one=None)])
+    deducted = []
+
+    async def deduct_inventory(_db, current_order):
+        deducted.append(current_order)
+
+    async def skip_complete(*_args):
+        return None
+
+    monkeypatch.setattr(order_service, "_deduct_reserved_inventory", deduct_inventory, raising=False)
+    monkeypatch.setattr(order_service, "_complete", skip_complete)
+
+    await order_service.transition_order(db, str(order.id), OrderStatus.stocked_out, "warehouse-user")
+    assert deducted == [order]
+    assert order.stock_out_by == "warehouse-user"
+    assert order.stock_out_at is not None
+
+    await order_service.transition_order(db, str(order.id), OrderStatus.delivered_unpaid, "delivery-user")
+    assert order.delivered_by == "delivery-user"
+    assert order.delivered_at is not None
+
+    await order_service.transition_order(db, str(order.id), OrderStatus.completed, "cashier-user")
+    assert order.paid_by == "cashier-user"
+    assert order.paid_at is not None
+
+
+@pytest.mark.asyncio
+async def test_cancel_placed_order_releases_allocated_inventory_without_stock_movement():
+    order = Order(id=uuid.uuid4(), order_no="ORD1")
     item = OrderItem(
         id=uuid.uuid4(),
         order_id=order.id,
@@ -1202,24 +1622,28 @@ async def test_cancel_placed_order_releases_locked_inventory_and_records_movemen
         unit_price=Decimal("10.00"),
         subtotal=Decimal("20.00"),
     )
+    warehouse_id = uuid.uuid4()
     inventory = Inventory(
         id=uuid.uuid4(),
         product_id=item.product_id,
-        warehouse_id=order.warehouse_id,
+        warehouse_id=warehouse_id,
         quantity=5,
         locked=2,
     )
-    db = QueueDb([FakeResult(values=[item]), FakeResult(one=inventory), FakeResult(scalar=0)])
+    allocation = OrderInventoryAllocation(
+        id=uuid.uuid4(), order_id=order.id, order_item_id=item.id,
+        product_id=item.product_id, warehouse_id=warehouse_id, quantity=2,
+        status=OrderInventoryAllocationStatus.reserved,
+    )
+    db = QueueDb([FakeResult(values=[item]), FakeResult(values=[allocation]), FakeResult(values=[inventory])])
 
     await order_service._release_locked_inventory(db, order, deduct_quantity=False)
 
     movements = [item for item in db.added if isinstance(item, InventoryMovement)]
     assert inventory.quantity == 5
     assert inventory.locked == 0
-    assert len(movements) == 1
-    assert movements[0].movement_type == MovementType.stock_out
-    assert movements[0].items[0].before_quantity == 5
-    assert movements[0].items[0].after_quantity == 5
+    assert allocation.status == OrderInventoryAllocationStatus.released
+    assert movements == []
 
 
 @pytest.mark.asyncio
@@ -1356,3 +1780,448 @@ async def test_list_products_filters_by_keyword_brand_and_inclusive_price_ranges
         assert "products.standard_price >=" in sql
         assert "products.standard_price <=" in sql
         assert "products.barcode" in sql
+
+
+def test_return_order_domain_contract():
+    from app.models.inventory import MovementType
+    from app.models.return_order import (
+        ReturnOrder,
+        ReturnOrderItem,
+        ReturnOrderStatus,
+        ReturnProductCondition,
+    )
+
+    assert {status.value for status in ReturnOrderStatus} == {"completed", "voided"}
+    assert {condition.value for condition in ReturnProductCondition} == {
+        "normal",
+        "expired",
+        "damaged",
+        "other",
+    }
+    assert {
+        "return_no",
+        "customer_id",
+        "total_amount",
+        "status",
+        "operator",
+        "completed_at",
+        "remark",
+        "customer_spent_before",
+        "customer_spent_after",
+        "spend_deduction_amount",
+        "voided_by",
+        "voided_at",
+        "void_reason",
+        "void_customer_spent_before",
+        "void_customer_spent_after",
+    }.issubset(ReturnOrder.__table__.columns.keys())
+    assert {
+        "return_order_id",
+        "product_id",
+        "product_name",
+        "barcode",
+        "quantity",
+        "unit_price",
+        "subtotal",
+        "condition",
+        "return_reason",
+        "remark",
+        "should_stock_in",
+        "warehouse_id",
+    }.issubset(ReturnOrderItem.__table__.columns.keys())
+    assert {
+        "customer_return_in",
+        "customer_return_void_out",
+    }.issubset({movement.value for movement in MovementType})
+
+
+def test_return_order_create_schema_validates_stock_in_warehouse_decision():
+    from app.schemas.return_order import ReturnOrderCreate, ReturnOrderItemCreate
+
+    common = {
+        "product_id": str(uuid.uuid4()),
+        "quantity": 1,
+        "unit_price": Decimal("10.00"),
+        "condition": "normal",
+        "return_reason": "客户拒收",
+    }
+    with pytest.raises(ValidationError, match="入库仓库"):
+        ReturnOrderCreate(
+            customer_id=str(uuid.uuid4()),
+            items=[ReturnOrderItemCreate(**common, should_stock_in=True)],
+        )
+    with pytest.raises(ValidationError, match="不得保留仓库"):
+        ReturnOrderCreate(
+            customer_id=str(uuid.uuid4()),
+            items=[
+                ReturnOrderItemCreate(
+                    **common,
+                    should_stock_in=False,
+                    warehouse_id=str(uuid.uuid4()),
+                )
+            ],
+        )
+
+
+def test_return_order_void_requires_non_blank_reason():
+    from app.schemas.return_order import ReturnOrderVoidRequest
+
+    with pytest.raises(ValidationError):
+        ReturnOrderVoidRequest(void_reason="   ")
+
+
+@pytest.mark.asyncio
+async def test_create_return_order_stocks_selected_items_and_deducts_actual_customer_spend(monkeypatch):
+    from app.models.return_order import ReturnOrder, ReturnOrderItem, ReturnOrderStatus
+    from app.schemas.return_order import ReturnOrderCreate, ReturnOrderItemCreate
+    from app.services import return_order_service
+
+    customer = Customer(
+        id=uuid.uuid4(),
+        name="退货客户",
+        contact_name="联系人",
+        contact_phone="13800000001",
+        level_id=uuid.uuid4(),
+        total_spent=Decimal("50.00"),
+        order_count=4,
+    )
+    original_level_id = customer.level_id
+    first_product = Product(
+        id=uuid.uuid4(), name="可入库商品", barcode="6900000000301",
+        category_id=uuid.uuid4(), unit="件", standard_price=Decimal("30.00"), cost_price=Decimal("10.00"),
+    )
+    second_product = Product(
+        id=uuid.uuid4(), name="过期商品", barcode="6900000000302",
+        category_id=uuid.uuid4(), unit="件", standard_price=Decimal("40.00"), cost_price=Decimal("12.00"),
+    )
+    warehouse = Warehouse(id=uuid.uuid4(), name="主仓", status=WarehouseStatus.active)
+    inventory = Inventory(
+        id=uuid.uuid4(), product_id=first_product.id, warehouse_id=warehouse.id,
+        quantity=3, locked=0,
+    )
+    db = QueueDb([
+        FakeResult(one=customer),
+        FakeResult(values=[first_product, second_product]),
+        FakeResult(values=[warehouse.id]),
+    ])
+
+    async def fixed_return_no(_db):
+        return "RET20260719000001"
+
+    async def fixed_movement_no(_db, _prefix):
+        return "CRI20260719000001"
+
+    async def get_inventory(_db, product_id, warehouse_id):
+        assert str(product_id) == str(first_product.id)
+        assert str(warehouse_id) == str(warehouse.id)
+        return inventory
+
+    monkeypatch.setattr(return_order_service, "generate_return_no", fixed_return_no)
+    monkeypatch.setattr(return_order_service, "_movement_no", fixed_movement_no)
+    monkeypatch.setattr(return_order_service, "_get_or_create_inventory", get_inventory)
+
+    result = await return_order_service.create_return_order(
+        db,
+        ReturnOrderCreate(
+            customer_id=str(customer.id),
+            items=[
+                ReturnOrderItemCreate(
+                    product_id=str(first_product.id), quantity=2, unit_price=30,
+                    condition="normal", return_reason="客户多买",
+                    should_stock_in=True, warehouse_id=str(warehouse.id),
+                ),
+                ReturnOrderItemCreate(
+                    product_id=str(second_product.id), quantity=1, unit_price=40,
+                    condition="expired", return_reason="商品过期", should_stock_in=False,
+                ),
+            ],
+        ),
+        operator="return-user",
+    )
+
+    assert isinstance(result, ReturnOrder)
+    assert result.status == ReturnOrderStatus.completed
+    assert result.total_amount == Decimal("100.00")
+    assert result.customer_spent_before == Decimal("50.00")
+    assert result.customer_spent_after == Decimal("0.00")
+    assert result.spend_deduction_amount == Decimal("50.00")
+    assert customer.total_spent == Decimal("0.00")
+    assert customer.order_count == 4
+    assert customer.level_id == original_level_id
+    assert inventory.quantity == 5
+    return_items = [added for added in db.added if isinstance(added, ReturnOrderItem)]
+    assert len(return_items) == 2
+    movements = [added for added in db.added if isinstance(added, InventoryMovement)]
+    assert len(movements) == 1
+    assert movements[0].movement_type == MovementType.customer_return_in
+
+
+@pytest.mark.asyncio
+async def test_void_return_order_reverses_inventory_and_only_restores_actual_deduction(monkeypatch):
+    from app.models.return_order import ReturnOrder, ReturnOrderItem, ReturnOrderStatus, ReturnProductCondition
+    from app.services import return_order_service
+
+    customer = Customer(
+        id=uuid.uuid4(), name="退货客户", contact_name="联系人",
+        contact_phone="13800000002", level_id=uuid.uuid4(), total_spent=Decimal("20.00"), order_count=4,
+    )
+    warehouse_id = uuid.uuid4()
+    product_id = uuid.uuid4()
+    return_order = ReturnOrder(
+        id=uuid.uuid4(), return_no="RET1", customer_id=customer.id,
+        total_amount=Decimal("100.00"), status=ReturnOrderStatus.completed,
+        operator="return-user", completed_at=datetime.now(timezone.utc).replace(tzinfo=None),
+        customer_spent_before=Decimal("50.00"), customer_spent_after=Decimal("0.00"),
+        spend_deduction_amount=Decimal("50.00"),
+    )
+    return_order.items = [
+        ReturnOrderItem(
+            id=uuid.uuid4(), return_order_id=return_order.id, product_id=product_id,
+            product_name="可入库商品", barcode="6900000000301", quantity=2,
+            unit_price=Decimal("30.00"), subtotal=Decimal("60.00"),
+            condition=ReturnProductCondition.normal, return_reason="客户多买",
+            should_stock_in=True, warehouse_id=warehouse_id,
+        )
+    ]
+    inventory = Inventory(
+        id=uuid.uuid4(), product_id=product_id, warehouse_id=warehouse_id,
+        quantity=5, locked=1,
+    )
+    db = QueueDb([FakeResult(one=return_order), FakeResult(one=customer)])
+
+    async def fixed_movement_no(_db, _prefix):
+        return "CRV20260719000001"
+
+    async def get_inventory(_db, _product_id, _warehouse_id):
+        return inventory
+
+    monkeypatch.setattr(return_order_service, "_movement_no", fixed_movement_no)
+    monkeypatch.setattr(return_order_service, "_get_or_create_inventory", get_inventory)
+
+    result = await return_order_service.void_return_order(
+        db, str(return_order.id), operator="audit-user", void_reason="录入错误"
+    )
+
+    assert result.status == ReturnOrderStatus.voided
+    assert inventory.quantity == 3
+    assert customer.total_spent == Decimal("70.00")
+    assert customer.order_count == 4
+    assert result.voided_by == "audit-user"
+    assert result.void_reason == "录入错误"
+    assert result.void_customer_spent_before == Decimal("20.00")
+    assert result.void_customer_spent_after == Decimal("70.00")
+    movements = [added for added in db.added if isinstance(added, InventoryMovement)]
+    assert len(movements) == 1
+    assert movements[0].movement_type == MovementType.customer_return_void_out
+
+
+@pytest.mark.asyncio
+async def test_void_return_order_rejects_inventory_that_would_consume_locked_stock(monkeypatch):
+    from app.models.return_order import ReturnOrder, ReturnOrderItem, ReturnOrderStatus, ReturnProductCondition
+    from app.services import return_order_service
+
+    customer = Customer(
+        id=uuid.uuid4(), name="退货客户", contact_name="联系人",
+        contact_phone="13800000003", level_id=uuid.uuid4(), total_spent=Decimal("20.00"), order_count=4,
+    )
+    warehouse_id = uuid.uuid4()
+    product_id = uuid.uuid4()
+    return_order = ReturnOrder(
+        id=uuid.uuid4(), return_no="RET1", customer_id=customer.id,
+        total_amount=Decimal("60.00"), status=ReturnOrderStatus.completed,
+        operator="return-user", completed_at=datetime.now(timezone.utc).replace(tzinfo=None),
+        customer_spent_before=Decimal("50.00"), customer_spent_after=Decimal("0.00"),
+        spend_deduction_amount=Decimal("50.00"),
+    )
+    return_order.items = [
+        ReturnOrderItem(
+            id=uuid.uuid4(), return_order_id=return_order.id, product_id=product_id,
+            product_name="可入库商品", barcode="6900000000301", quantity=2,
+            unit_price=Decimal("30.00"), subtotal=Decimal("60.00"),
+            condition=ReturnProductCondition.normal, return_reason="客户多买",
+            should_stock_in=True, warehouse_id=warehouse_id,
+        )
+    ]
+    inventory = Inventory(
+        id=uuid.uuid4(), product_id=product_id, warehouse_id=warehouse_id,
+        quantity=5, locked=4,
+    )
+    db = QueueDb([FakeResult(one=return_order), FakeResult(one=customer)])
+
+    async def get_inventory(_db, _product_id, _warehouse_id):
+        return inventory
+
+    monkeypatch.setattr(return_order_service, "_get_or_create_inventory", get_inventory)
+
+    with pytest.raises(ValueError, match="可用库存不足"):
+        await return_order_service.void_return_order(
+            db, str(return_order.id), operator="audit-user", void_reason="录入错误"
+        )
+
+    assert return_order.status == ReturnOrderStatus.completed
+    assert inventory.quantity == 5
+    assert customer.total_spent == Decimal("20.00")
+
+
+def test_return_order_routes_and_auth_contract():
+    return_routes = [
+        route for route in app.routes
+        if route.path.startswith("/api/v1/return-orders")
+    ]
+    assert {(route.path, tuple(sorted(route.methods))) for route in return_routes} == {
+        ("/api/v1/return-orders", ("POST",)),
+        ("/api/v1/return-orders", ("GET",)),
+        ("/api/v1/return-orders/{return_order_id}", ("GET",)),
+        ("/api/v1/return-orders/{return_order_id}/void", ("PUT",)),
+    }
+    for route in return_routes:
+        dependency_names = {
+            dependency.call.__name__
+            for dependency in route.dependant.dependencies
+            if dependency.call is not None
+        }
+        assert "get_current_user" in dependency_names
+
+
+@pytest.mark.asyncio
+async def test_shipping_reallocation_reuses_previously_released_warehouse_row():
+    order = Order(id=uuid.uuid4(), order_no="ORD1", customer_id=uuid.uuid4(), total_amount=Decimal("50.00"), status=OrderStatus.shipping)
+    item = OrderItem(
+        id=uuid.uuid4(), order_id=order.id, product_id=uuid.uuid4(), barcode="商品-001",
+        product_name="测试商品", quantity=5, unit_price=Decimal("10.00"), subtotal=Decimal("50.00"),
+    )
+    first_warehouse_id = uuid.uuid4()
+    second_warehouse_id = uuid.uuid4()
+    released_allocation = OrderInventoryAllocation(
+        id=uuid.uuid4(), order_id=order.id, order_item_id=item.id, product_id=item.product_id,
+        warehouse_id=first_warehouse_id, quantity=5, status=OrderInventoryAllocationStatus.released,
+    )
+    reserved_allocation = OrderInventoryAllocation(
+        id=uuid.uuid4(), order_id=order.id, order_item_id=item.id, product_id=item.product_id,
+        warehouse_id=second_warehouse_id, quantity=5, status=OrderInventoryAllocationStatus.reserved,
+    )
+    first_inventory = Inventory(id=uuid.uuid4(), product_id=item.product_id, warehouse_id=first_warehouse_id, quantity=5, locked=0)
+    second_inventory = Inventory(id=uuid.uuid4(), product_id=item.product_id, warehouse_id=second_warehouse_id, quantity=5, locked=5)
+    db = QueueDb([
+        FakeResult(values=[item]),
+        FakeResult(values=[released_allocation, reserved_allocation]),
+        FakeResult(values=[first_inventory, second_inventory]),
+    ])
+
+    await order_service._reallocate_reserved_inventory(
+        db,
+        order,
+        OrderShipRequest(allocations=[
+            OrderShipmentAllocation(order_item_id=str(item.id), warehouse_id=str(first_warehouse_id), quantity=5),
+        ]),
+    )
+
+    created_allocations = [added for added in db.added if isinstance(added, OrderInventoryAllocation)]
+    assert created_allocations == []
+    assert released_allocation.status == OrderInventoryAllocationStatus.reserved
+    assert released_allocation.quantity == 5
+    assert reserved_allocation.status == OrderInventoryAllocationStatus.released
+    assert (first_inventory.locked, second_inventory.locked) == (5, 0)
+
+
+@pytest.mark.asyncio
+async def test_order_output_does_not_lazy_load_relationships():
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    class RelationshipGuardOrder:
+        id = uuid.uuid4()
+        order_no = "ORD1"
+        customer_id = uuid.uuid4()
+        total_amount = Decimal("20.00")
+        status = OrderStatus.placed
+        remark = None
+        shipping_started_at = None
+        shipping_started_by = None
+        stock_out_at = None
+        stock_out_by = None
+        delivered_at = None
+        delivered_by = None
+        paid_at = None
+        paid_by = None
+        cancelled_at = None
+        cancelled_by = None
+        cancel_reason = None
+        created_at = now
+        updated_at = now
+
+        def __getattribute__(self, name):
+            if name in {"items", "inventory_allocations", "customer"}:
+                raise RuntimeError("relationship lazy load attempted")
+            return super().__getattribute__(name)
+
+    db = QueueDb([
+        FakeResult(values=[]),
+        FakeResult(values=[]),
+        FakeResult(one="测试客户"),
+        FakeResult(values=[]),
+    ])
+
+    result = await order_service._out(db, RelationshipGuardOrder())
+
+    assert result.order_no == "ORD1"
+    assert result.customer_name == "测试客户"
+    assert result.items == []
+
+
+@pytest.mark.asyncio
+async def test_shipping_options_include_current_order_reservation_in_available_quantity():
+    order = Order(
+        id=uuid.uuid4(), order_no="ORD1", customer_id=uuid.uuid4(),
+        total_amount=Decimal("50.00"), status=OrderStatus.placed,
+    )
+    item = OrderItem(
+        id=uuid.uuid4(), order_id=order.id, product_id=uuid.uuid4(),
+        barcode="商品-001", product_name="测试商品", quantity=3,
+        unit_price=Decimal("10.00"), subtotal=Decimal("30.00"),
+    )
+    first_warehouse = Warehouse(id=uuid.uuid4(), name="主仓", status=WarehouseStatus.active, is_default=True)
+    second_warehouse = Warehouse(id=uuid.uuid4(), name="备用仓", status=WarehouseStatus.active)
+    first_inventory = Inventory(
+        id=uuid.uuid4(), product_id=item.product_id, warehouse_id=first_warehouse.id,
+        quantity=10, locked=5,
+    )
+    second_inventory = Inventory(
+        id=uuid.uuid4(), product_id=item.product_id, warehouse_id=second_warehouse.id,
+        quantity=4, locked=4,
+    )
+    allocation = OrderInventoryAllocation(
+        id=uuid.uuid4(), order_id=order.id, order_item_id=item.id,
+        product_id=item.product_id, warehouse_id=first_warehouse.id,
+        quantity=3, status=OrderInventoryAllocationStatus.reserved,
+    )
+    db = QueueDb([
+        FakeResult(one=order),
+        FakeResult(values=[item]),
+        FakeResult(values=[allocation]),
+        FakeResult(values=[first_warehouse, second_warehouse]),
+        FakeResult(values=[first_inventory, second_inventory]),
+    ])
+
+    result = await order_service.get_shipping_options(db, str(order.id))
+
+    assert [option.available_quantity for option in result.items[0].warehouses] == [8, 0]
+
+
+@pytest.mark.asyncio
+async def test_shipping_options_reject_orders_after_stock_out():
+    order = Order(
+        id=uuid.uuid4(), order_no="ORD1", customer_id=uuid.uuid4(),
+        total_amount=Decimal("50.00"), status=OrderStatus.stocked_out,
+    )
+
+    with pytest.raises(ValueError, match="已下单或正在发货"):
+        await order_service.get_shipping_options(QueueDb([FakeResult(one=order)]), str(order.id))
+
+
+def test_order_shipping_options_route_is_available():
+    routes = {
+        (route.path, tuple(sorted(route.methods)))
+        for route in app.routes
+        if route.path.startswith("/api/v1/orders/")
+    }
+    assert ("/api/v1/orders/{order_id}/shipping-options", ("GET",)) in routes

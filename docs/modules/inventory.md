@@ -64,8 +64,10 @@ InventoryMovement
 | `transfer_in` | 调拨入库 | 从其他仓库调入 |
 | `transfer_out` | 调拨出库 | 调出到其他仓库 |
 | `stocktake_adjustment` | 盘点调整 | 盘点校正差异 |
-| `order_deduction` | 订单扣减 | 订单发货时扣减实际库存 |
-| `order_return` | 订单退货 | shipped/paid→cancelled 时恢复已扣减库存 |
+| `order_deduction` | 订单扣减 | 销售订单确认出库时按仓库扣减实际库存 |
+| `order_return` | 历史订单退回 | 保留的历史流水类型，新订单出库后不允许直接取消 |
+| `customer_return_in` | 客户退货入库 | 退货单中选择入库的明细增加库存 |
+| `customer_return_void_out` | 退货作废出库 | 作废退货单时扣回原入库库存 |
 
 ### Warehouse (仓库)
 
@@ -96,7 +98,7 @@ Supplier
 
 ## 业务规则
 
-1. **库存锁定**: 创建订单时锁定库存（locked += N），发货时扣减（quantity -= N, locked -= N）
+1. **库存锁定**: 创建订单时锁定库存；开始发货可调整分仓，确认出库时才执行 `quantity -= N, locked -= N`
 2. **可用库存校验**: 入库/出库/调拨前必须检查 `quantity - locked >= 操作数量`
 3. **盘点保护**: 盘点时 `actual_quantity >= locked`，不允许将可用库存盘为负数
 4. **变动可追溯**: 每次库存变更必须记录 InventoryMovement，不可跳过

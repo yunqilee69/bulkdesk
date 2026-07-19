@@ -17,5 +17,6 @@ export default {
   'menu.inventory.movements': '库存流水',
   'menu.order': '订单管理',
   'menu.order.list': '订单列表',
+  'menu.order.returns': '退货单',
   'menu.login': '登录',
 };

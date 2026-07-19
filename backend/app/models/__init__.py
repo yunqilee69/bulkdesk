@@ -33,6 +33,12 @@ from app.models.order import (
     OrderStatus,
     OrderStatusLog,
 )
+from app.models.return_order import (
+    ReturnOrder,
+    ReturnOrderItem,
+    ReturnOrderStatus,
+    ReturnProductCondition,
+)
 
 __all__ = [
     "UUIDMixin",
@@ -65,4 +71,8 @@ __all__ = [
     "OrderStatus",
     "OrderItem",
     "OrderStatusLog",
+    "ReturnOrder",
+    "ReturnOrderItem",
+    "ReturnOrderStatus",
+    "ReturnProductCondition",
 ]

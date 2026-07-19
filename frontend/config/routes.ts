@@ -34,6 +34,7 @@ export default [
     routes: [
       { path: '/order', redirect: '/order/list' },
       { path: '/order/list', name: 'list', component: './Order' },
+      { path: '/order/returns', name: 'returns', component: './ReturnOrder' },
     ],
   },
   { path: '/customer', name: 'customer', icon: 'user', component: './Customer' },
