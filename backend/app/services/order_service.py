@@ -7,11 +7,17 @@ from sqlalchemy import func, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.customer import Customer, MemberPrice
+from app.models.employee import Employee
 from app.models.inventory import Inventory, InventoryMovement, InventoryMovementItem, MovementType, Warehouse, WarehouseStatus
 from app.models.order import Order, OrderInventoryAllocation, OrderInventoryAllocationStatus, OrderItem, OrderStatus, OrderStatusLog
+from app.models.order_delivery import (
+    OrderDelivery,
+    OrderDeliveryEvent,
+    OrderDeliveryEventType,
+)
 from app.models.product import Product, ProductStatus
 from app.schemas.common import PaginatedResponse
-from app.schemas.order import OrderCreate, OrderInventoryAllocationOut, OrderItemOut, OrderOut, OrderShipRequest, OrderShipmentAllocation, OrderShippingItemOptionsOut, OrderShippingOptionsOut, OrderShippingWarehouseOptionOut, OrderStatusLogOut
+from app.schemas.order import OrderCompleteRequest, OrderCreate, OrderDeliveryLatestExceptionOut, OrderDeliveryOrderSummaryOut, OrderInventoryAllocationOut, OrderItemOut, OrderOut, OrderShipRequest, OrderShipmentAllocation, OrderShippingItemOptionsOut, OrderShippingOptionsOut, OrderShippingWarehouseOptionOut, OrderStatusLogOut, OrderStockOutRequest
 
 VALID_TRANSITIONS = {
     OrderStatus.placed: [OrderStatus.shipping, OrderStatus.cancelled],
@@ -21,6 +27,10 @@ VALID_TRANSITIONS = {
     OrderStatus.completed: [],
     OrderStatus.cancelled: [],
 }
+
+
+def _operator_username(operator: str | Employee) -> str:
+    return operator.username if isinstance(operator, Employee) else operator
 
 async def generate_order_no(db: AsyncSession) -> str:
     prefix = f"ORD{datetime.now(timezone.utc):%Y%m%d}"
@@ -122,13 +132,14 @@ async def _release(db: AsyncSession, order: Order, restore: bool):
 async def _release_locked_inventory(db: AsyncSession, order: Order, deduct_quantity: bool):
     await _release(db, order, deduct_quantity)
 
-async def _complete(db: AsyncSession, order: Order):
+async def _complete(db: AsyncSession, order: Order, paid_amount: Decimal | None = None):
     customer = (await db.execute(select(Customer).where(Customer.id == order.customer_id))).scalar_one_or_none()
     if not customer: return
-    customer.total_spent = Decimal(str(customer.total_spent)) + Decimal(str(order.total_amount)); customer.order_count += 1; customer.last_order_at = order.created_at
+    actual_paid_amount = paid_amount or order.paid_amount or order.total_amount
+    customer.total_spent = Decimal(str(customer.total_spent)) + Decimal(str(actual_paid_amount)); customer.order_count += 1; customer.last_order_at = order.created_at
 
-async def _complete_order(db: AsyncSession, order: Order):
-    await _complete(db, order)
+async def _complete_order(db: AsyncSession, order: Order, paid_amount: Decimal | None = None):
+    await _complete(db, order, paid_amount)
 
 async def _reallocate_reserved_inventory(db: AsyncSession, order: Order, req: OrderShipRequest):
     items = await _items(db, order.id)
@@ -370,35 +381,110 @@ async def get_shipping_options(db: AsyncSession, order_id: str):
         ]
     )
 
-async def transition_order(db: AsyncSession, order_id: str, target_status: OrderStatus, operator: str, cancel_reason: Optional[str] = None, ship_request: Optional[OrderShipRequest] = None):
+async def transition_order(
+    db: AsyncSession,
+    order_id: str,
+    target_status: OrderStatus,
+    operator: str | Employee,
+    cancel_reason: Optional[str] = None,
+    ship_request: Optional[OrderShipRequest] = None,
+    stock_out_request: Optional[OrderStockOutRequest] = None,
+    complete_request: Optional[OrderCompleteRequest] = None,
+):
     order = (await db.execute(select(Order).where(Order.id == order_id).with_for_update())).scalar_one_or_none()
     if not order: raise ValueError("订单不存在")
     if target_status not in VALID_TRANSITIONS[order.status]: raise ValueError("订单状态流转无效")
     current = order.status
+    operator_username = _operator_username(operator)
     if target_status == OrderStatus.shipping:
         if ship_request is None: raise ValueError("发货仓库分配不能为空")
         await _reallocate_reserved_inventory(db, order, ship_request)
         order.shipping_started_at = datetime.now(timezone.utc).replace(tzinfo=None)
-        order.shipping_started_by = operator
+        order.shipping_started_by = operator_username
     elif target_status == OrderStatus.stocked_out:
+        if stock_out_request is None:
+            raise ValueError("配送信息不能为空")
+        if not isinstance(operator, Employee):
+            raise ValueError("出库操作员工不能为空")
         await _deduct_reserved_inventory(db, order)
         order.stock_out_at = datetime.now(timezone.utc).replace(tzinfo=None)
-        order.stock_out_by = operator
+        order.stock_out_by = operator_username
+        from app.services.order_delivery_service import create_order_delivery
+
+        await create_order_delivery(
+            db,
+            order,
+            stock_out_request,
+            operator,
+        )
     elif target_status == OrderStatus.delivered_unpaid:
         order.delivered_at = datetime.now(timezone.utc).replace(tzinfo=None)
-        order.delivered_by = operator
+        order.delivered_by = operator_username
     elif target_status == OrderStatus.completed:
-        await _complete(db, order)
+        if complete_request is None:
+            raise ValueError("收款信息不能为空")
+        paid_amount = Decimal(str(complete_request.paid_amount))
+        if paid_amount > Decimal(str(order.total_amount)):
+            raise ValueError("实收金额不能超过订单金额")
+        order.paid_amount = paid_amount
+        order.payment_proof_image_urls = complete_request.payment_proof_image_urls
+        await _complete(db, order, paid_amount)
         order.paid_at = datetime.now(timezone.utc).replace(tzinfo=None)
-        order.paid_by = operator
+        order.paid_by = operator_username
     elif target_status == OrderStatus.cancelled:
         await _release_locked_inventory(db, order, False)
         order.cancelled_at = datetime.now(timezone.utc).replace(tzinfo=None)
-        order.cancelled_by = operator
+        order.cancelled_by = operator_username
         order.cancel_reason = cancel_reason
-    order.status = target_status; db.add(OrderStatusLog(order_id=order.id, from_status=current, to_status=target_status, operator=operator, remark=cancel_reason)); await db.flush(); return order
+    order.status = target_status; db.add(OrderStatusLog(order_id=order.id, from_status=current, to_status=target_status, operator=operator_username, remark=cancel_reason)); await db.flush(); return order
 
-async def _out(db: AsyncSession, order: Order):
+async def _latest_delivery_exceptions(
+    db: AsyncSession,
+    delivery_ids: list[uuid.UUID],
+) -> dict[uuid.UUID, OrderDeliveryEvent]:
+    if not delivery_ids:
+        return {}
+    ranked_exceptions = (
+        select(
+            OrderDeliveryEvent.id.label("event_id"),
+            func.row_number()
+            .over(
+                partition_by=OrderDeliveryEvent.delivery_id,
+                order_by=(
+                    OrderDeliveryEvent.created_at.desc(),
+                    OrderDeliveryEvent.id.desc(),
+                ),
+            )
+            .label("event_rank"),
+        )
+        .where(
+            OrderDeliveryEvent.delivery_id.in_(delivery_ids),
+            OrderDeliveryEvent.event_type == OrderDeliveryEventType.exception,
+        )
+        .subquery()
+    )
+    events = (
+        await db.execute(
+            select(OrderDeliveryEvent)
+            .join(
+                ranked_exceptions,
+                OrderDeliveryEvent.id == ranked_exceptions.c.event_id,
+            )
+            .where(ranked_exceptions.c.event_rank == 1)
+        )
+    ).scalars().all()
+    return {event.delivery_id: event for event in events}
+
+
+async def _out(
+    db: AsyncSession,
+    order: Order,
+    delivery: Optional[OrderDelivery] = None,
+    latest_exception: Optional[OrderDeliveryEvent] = None,
+    *,
+    delivery_loaded: bool = False,
+    latest_exception_loaded: bool = False,
+):
     out = OrderOut.model_validate(
         {
             column.name: getattr(order, column.name)
@@ -423,12 +509,67 @@ async def _out(db: AsyncSession, order: Order):
         out.items.append(item_out)
     out.customer_name = (await db.execute(select(Customer.name).where(Customer.id == order.customer_id))).scalar_one_or_none()
     out.status_logs = [OrderStatusLogOut.model_validate(row) for row in (await db.execute(select(OrderStatusLog).where(OrderStatusLog.order_id == order.id).order_by(OrderStatusLog.created_at))).scalars().all()]
+    if not delivery_loaded:
+        delivery = (
+            await db.execute(
+                select(OrderDelivery).where(OrderDelivery.order_id == order.id)
+            )
+        ).scalar_one_or_none()
+    if delivery and not latest_exception_loaded:
+        latest_exception = (
+            await _latest_delivery_exceptions(db, [delivery.id])
+        ).get(delivery.id)
+    if delivery:
+        summary = OrderDeliveryOrderSummaryOut.model_validate(delivery)
+        if latest_exception:
+            summary.latest_exception = OrderDeliveryLatestExceptionOut(
+                exception_type=latest_exception.exception_type,
+                remark=latest_exception.remark,
+                occurred_at=latest_exception.created_at,
+            )
+        out.delivery = summary
+    else:
+        out.delivery = None
     return out
 async def list_orders(db: AsyncSession, page=1, page_size=20, status: Optional[OrderStatus]=None, customer_id: Optional[str]=None):
     query = select(Order); count = select(func.count()).select_from(Order)
     if status: query, count = query.where(Order.status == status), count.where(Order.status == status)
     if customer_id: query, count = query.where(Order.customer_id == customer_id), count.where(Order.customer_id == customer_id)
-    total = (await db.execute(count)).scalar() or 0; rows = (await db.execute(query.order_by(Order.created_at.desc()).offset((page-1)*page_size).limit(page_size))).scalars().all(); return PaginatedResponse(items=[await _out(db, row) for row in rows], total=total, page=page, page_size=page_size)
+    total = (await db.execute(count)).scalar() or 0
+    rows = (await db.execute(query.order_by(Order.created_at.desc()).offset((page-1)*page_size).limit(page_size))).scalars().all()
+    delivery_map = {}
+    latest_exception_map = {}
+    if rows:
+        deliveries = (
+            await db.execute(
+                select(OrderDelivery).where(
+                    OrderDelivery.order_id.in_([row.id for row in rows])
+                )
+            )
+        ).scalars().all()
+        delivery_map = {delivery.order_id: delivery for delivery in deliveries}
+        latest_exception_map = await _latest_delivery_exceptions(
+            db,
+            [delivery.id for delivery in deliveries],
+        )
+    return PaginatedResponse(
+        items=[
+            await _out(
+                db,
+                row,
+                delivery_map.get(row.id),
+                latest_exception_map.get(delivery_map[row.id].id)
+                if row.id in delivery_map
+                else None,
+                delivery_loaded=True,
+                latest_exception_loaded=True,
+            )
+            for row in rows
+        ],
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
 async def get_order(db: AsyncSession, order_id: str):
     order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
     if not order: raise ValueError("订单不存在")

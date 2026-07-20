@@ -5,13 +5,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.deps import CurrentUser, oauth2_scheme
 from app.core.redis import get_redis
-from app.schemas.auth import LoginRequest, RefreshRequest, TokenResponse
+from app.schemas.auth import CurrentUserResponse, LoginRequest, RefreshRequest, TokenResponse
 from app.schemas.common import ResponseBase
 from app.services.auth_service import login as auth_login
 from app.services.auth_service import logout as auth_logout
 from app.services.auth_service import refresh_access_token
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
+
+
+@router.get("/me", response_model=ResponseBase[CurrentUserResponse])
+async def current_user(current_user: CurrentUser):
+    return ResponseBase(
+        data=CurrentUserResponse(
+            id=str(current_user.id),
+            username=current_user.username,
+            role=current_user.role.value,
+        )
+    )
 
 
 @router.post("/login", response_model=ResponseBase[TokenResponse])

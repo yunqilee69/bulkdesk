@@ -19,7 +19,11 @@ def get_password_hash(password: str) -> str:
 
 
 def create_access_token(
-    subject: str, role: str, expires_delta: Optional[timedelta] = None
+    subject: str,
+    role: str,
+    expires_delta: Optional[timedelta] = None,
+    *,
+    employee_id: Optional[str] = None,
 ) -> Tuple[str, str]:
     jti = str(uuid.uuid4())
     expire = datetime.now(timezone.utc) + (
@@ -32,6 +36,8 @@ def create_access_token(
         "jti": jti,
         "type": "access",
     }
+    if employee_id:
+        payload["employee_id"] = employee_id
     token = jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
     return token, jti
 

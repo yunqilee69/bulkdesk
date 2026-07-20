@@ -34,9 +34,11 @@ export default [
     routes: [
       { path: '/order', redirect: '/order/list' },
       { path: '/order/list', name: 'list', component: './Order' },
+      { path: '/order/detail/:id', component: './Order/Detail', hideInMenu: true },
       { path: '/order/returns', name: 'returns', component: './ReturnOrder' },
     ],
   },
+  { path: '/delivery', name: 'delivery', icon: 'car', component: './Delivery' },
   { path: '/customer', name: 'customer', icon: 'user', component: './Customer' },
   { path: '/level', name: 'level', icon: 'crown', access: 'canAdmin', component: './Level' },
   { path: '/employee', name: 'employee', icon: 'team', access: 'canAdmin', component: './Employee' },

@@ -9,6 +9,7 @@ declare module '*.gif';
 
 declare namespace API {
   interface CurrentUser {
+    id?: string;
     username: string;
     role: string;
     avatar?: string;

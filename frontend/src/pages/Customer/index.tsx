@@ -16,9 +16,9 @@ import {
   updateCustomer,
   listAllLevels,
 } from '@/services/customer';
-import React, { useRef, useEffect, useState } from 'react';
+import React, { useRef, useEffect, useMemo, useState } from 'react';
 import type { ActionType, ProColumns } from '@ant-design/pro-components';
-import { request } from '@umijs/max';
+import { request, useLocation } from '@umijs/max';
 
 interface CustomerRecord {
   id: string;
@@ -41,6 +41,7 @@ interface LevelOption {
 }
 
 const Customer: React.FC = () => {
+  const location = useLocation();
   const actionRef = useRef<ActionType>(null);
   const [createModalOpen, handleCreateModalOpen] = useState(false);
   const [editModalOpen, handleEditModalOpen] = useState(false);
@@ -48,6 +49,7 @@ const Customer: React.FC = () => {
   const [levelOptions, setLevelOptions] = useState<LevelOption[]>([]);
   const [createFileList, setCreateFileList] = useState<UploadFile[]>([]);
   const [editFileList, setEditFileList] = useState<UploadFile[]>([]);
+  const routeKeyword = useMemo(() => new URLSearchParams(location.search).get('keyword') || undefined, [location.search]);
 
   useEffect(() => {
     const fetchLevels = async () => {
@@ -176,6 +178,8 @@ const Customer: React.FC = () => {
       <ProTable<CustomerRecord>
         actionRef={actionRef}
         rowKey="id"
+        params={{ routeKeyword }}
+        form={{ initialValues: { name: routeKeyword } }}
         search={{
           labelWidth: 120,
         }}
@@ -186,7 +190,7 @@ const Customer: React.FC = () => {
         ]}
         request={async (params) => {
           const res = await listCustomers({
-            keyword: params.name,
+            keyword: (params.name as string | undefined) ?? (params.routeKeyword as string | undefined),
             page: params.current,
             page_size: params.pageSize,
           });

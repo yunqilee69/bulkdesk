@@ -13,5 +13,11 @@ class TokenResponse(ApiSchema):
     token_type: str = "bearer"
 
 
+class CurrentUserResponse(ApiSchema):
+    id: str
+    username: str
+    role: str
+
+
 class RefreshRequest(ApiSchema):
     refresh_token: str

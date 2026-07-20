@@ -44,14 +44,13 @@ export type OrderAction =
   | 'startShipping'
   | 'adjustAllocations'
   | 'stockOut'
-  | 'deliver'
   | 'complete'
   | 'cancel';
 
 const actionsByStatus: Record<string, OrderAction[]> = {
   placed: ['startShipping', 'cancel'],
   shipping: ['adjustAllocations', 'stockOut', 'cancel'],
-  stocked_out: ['deliver'],
+  stocked_out: [],
   delivered_unpaid: ['complete'],
   completed: [],
   cancelled: [],

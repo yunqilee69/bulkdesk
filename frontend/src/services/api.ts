@@ -11,11 +11,22 @@ export async function logout() {
 export async function currentUser() {
   const token = localStorage.getItem('access_token');
   if (!token) return undefined;
+  let payload: { employee_id?: string; sub: string; role: string };
   try {
-    const payload = JSON.parse(atob(token.split('.')[1]));
-    return { username: payload.sub, role: payload.role, access: payload.role } as API.CurrentUser;
+    payload = JSON.parse(atob(token.split('.')[1]));
   } catch {
     localStorage.removeItem('access_token');
     return undefined;
   }
+  try {
+    const response = await request<API.ResponseBase<API.CurrentUser>>('/api/v1/auth/me', { method: 'GET' });
+    if (response.code === 0 && response.data?.id) {
+      return { ...response.data, access: response.data.role } as API.CurrentUser;
+    }
+  } catch {
+    localStorage.removeItem('access_token');
+    return undefined;
+  }
+  localStorage.removeItem('access_token');
+  return undefined;
 }

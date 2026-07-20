@@ -33,6 +33,13 @@ from app.models.order import (
     OrderStatus,
     OrderStatusLog,
 )
+from app.models.order_delivery import (
+    OrderDelivery,
+    OrderDeliveryEvent,
+    OrderDeliveryEventType,
+    OrderDeliveryExceptionType,
+    OrderDeliveryStatus,
+)
 from app.models.return_order import (
     ReturnOrder,
     ReturnOrderItem,
@@ -71,6 +78,11 @@ __all__ = [
     "OrderStatus",
     "OrderItem",
     "OrderStatusLog",
+    "OrderDelivery",
+    "OrderDeliveryEvent",
+    "OrderDeliveryStatus",
+    "OrderDeliveryEventType",
+    "OrderDeliveryExceptionType",
     "ReturnOrder",
     "ReturnOrderItem",
     "ReturnOrderStatus",

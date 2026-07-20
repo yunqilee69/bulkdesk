@@ -1,13 +1,15 @@
 import enum
 import uuid
 from datetime import datetime
-from typing import Optional
+from decimal import Decimal
+from typing import TYPE_CHECKING, Optional
 
 from sqlalchemy import (
     CheckConstraint,
     DateTime,
     Enum,
     ForeignKey,
+    JSON,
     Numeric,
     String,
     Text,
@@ -18,6 +20,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
 from app.models.base import TimestampMixin, UUIDMixin
+
+if TYPE_CHECKING:
+    from app.models.order_delivery import OrderDelivery
 
 
 class OrderStatus(str, enum.Enum):
@@ -38,6 +43,17 @@ class OrderInventoryAllocationStatus(str, enum.Enum):
 
 class Order(UUIDMixin, TimestampMixin, Base):
     __tablename__ = "orders"
+    __table_args__ = (
+        CheckConstraint(
+            "paid_amount IS NULL OR (paid_amount > 0 AND paid_amount <= total_amount)",
+            name="ck_orders_paid_amount_range",
+        ),
+        CheckConstraint(
+            "payment_proof_image_urls IS NULL "
+            "OR json_typeof(payment_proof_image_urls) = 'array'",
+            name="ck_orders_payment_proof_image_urls_array",
+        ),
+    )
 
     order_no: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     customer_id: Mapped[uuid.UUID] = mapped_column(
@@ -58,6 +74,8 @@ class Order(UUIDMixin, TimestampMixin, Base):
     delivered_by: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     paid_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     paid_by: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    paid_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    payment_proof_image_urls: Mapped[Optional[list[str]]] = mapped_column(JSON, nullable=True)
     cancelled_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     cancelled_by: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     cancel_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -66,6 +84,9 @@ class Order(UUIDMixin, TimestampMixin, Base):
     items: Mapped[list["OrderItem"]] = relationship(back_populates="order")
     inventory_allocations: Mapped[list["OrderInventoryAllocation"]] = relationship(
         back_populates="order"
+    )
+    delivery: Mapped[Optional["OrderDelivery"]] = relationship(
+        back_populates="order", uselist=False
     )
 
 

@@ -1,3 +1,5 @@
+from uuid import UUID
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -5,7 +7,15 @@ from app.core.database import get_db
 from app.core.deps import CurrentUser
 from app.models.order import OrderStatus
 from app.schemas.common import PaginatedResponse, ResponseBase
-from app.schemas.order import OrderActionRequest, OrderCreate, OrderOut, OrderShippingOptionsOut, OrderShipRequest
+from app.schemas.order import (
+    OrderActionRequest,
+    OrderCompleteRequest,
+    OrderCreate,
+    OrderOut,
+    OrderShippingOptionsOut,
+    OrderShipRequest,
+    OrderStockOutRequest,
+)
 from app.services.order_service import (
     create_order,
     get_order,
@@ -112,29 +122,18 @@ async def adjust_shipping_allocations(
 
 @router.put("/{order_id}/stock-out", response_model=ResponseBase[OrderOut])
 async def stock_out(
-    order_id: str,
+    order_id: UUID,
+    req: OrderStockOutRequest,
     current_user: CurrentUser = None,
     db: AsyncSession = Depends(get_db),
 ):
     try:
         order = await transition_order(
-            db, order_id, OrderStatus.stocked_out, current_user.username
-        )
-        order_out = await get_order(db, str(order.id))
-        return ResponseBase(data=order_out)
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-
-
-@router.put("/{order_id}/deliver", response_model=ResponseBase[OrderOut])
-async def deliver(
-    order_id: str,
-    current_user: CurrentUser = None,
-    db: AsyncSession = Depends(get_db),
-):
-    try:
-        order = await transition_order(
-            db, order_id, OrderStatus.delivered_unpaid, current_user.username
+            db,
+            str(order_id),
+            OrderStatus.stocked_out,
+            current_user,
+            stock_out_request=req,
         )
         order_out = await get_order(db, str(order.id))
         return ResponseBase(data=order_out)
@@ -145,12 +144,13 @@ async def deliver(
 @router.put("/{order_id}/complete", response_model=ResponseBase[OrderOut])
 async def complete(
     order_id: str,
+    req: OrderCompleteRequest,
     current_user: CurrentUser = None,
     db: AsyncSession = Depends(get_db),
 ):
     try:
         order = await transition_order(
-            db, order_id, OrderStatus.completed, current_user.username
+            db, order_id, OrderStatus.completed, current_user.username, complete_request=req
         )
         order_out = await get_order(db, str(order.id))
         return ResponseBase(data=order_out)

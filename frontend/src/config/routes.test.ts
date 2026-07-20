@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import routes from '../../config/routes';
+import menu from '../locales/zh-CN/menu';
 
 describe('main menu routes', () => {
   it('keeps the requested top-level menu order', () => {
@@ -8,6 +9,7 @@ describe('main menu routes', () => {
       '/product',
       '/inventory',
       '/order',
+      '/delivery',
       '/customer',
       '/level',
       '/employee',
@@ -17,6 +19,24 @@ describe('main menu routes', () => {
     expect(mainRoutes.map((route) => route.path)).toEqual([
       ...mainMenuPaths,
     ]);
+  });
+
+  it('exposes delivery management to authenticated employees', () => {
+    expect(routes.find((route) => route.path === '/delivery')).toMatchObject({
+      name: 'delivery',
+      component: './Delivery',
+    });
+    expect(routes.find((route) => route.path === '/delivery')).not.toHaveProperty('access');
+    expect(menu['menu.delivery']).toBe('配送管理');
+  });
+
+  it('registers the order detail page as a hidden child route', () => {
+    const orderRoute = routes.find((route) => route.path === '/order');
+
+    expect(orderRoute?.routes?.find((route) => route.path === '/order/detail/:id')).toMatchObject({
+      component: './Order/Detail',
+      hideInMenu: true,
+    });
   });
 
   it('exposes customer, level, and employee management as direct top-level pages', () => {

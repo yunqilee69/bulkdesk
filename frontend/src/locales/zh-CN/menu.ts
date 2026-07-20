@@ -18,5 +18,6 @@ export default {
   'menu.order': '订单管理',
   'menu.order.list': '订单列表',
   'menu.order.returns': '退货单',
+  'menu.delivery': '配送管理',
   'menu.login': '登录',
 };

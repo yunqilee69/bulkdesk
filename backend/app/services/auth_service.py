@@ -26,7 +26,9 @@ async def login(
     if employee.status != EmployeeStatus.active:
         raise ValueError("Employee account is disabled")
 
-    access_token, _ = create_access_token(employee.username, employee.role.value)
+    access_token, _ = create_access_token(
+        employee.username, employee.role.value, employee_id=str(employee.id)
+    )
     refresh_token, _ = create_refresh_token(employee.username, employee.role.value)
 
     employee.last_login_at = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -67,8 +69,7 @@ async def refresh_access_token(
             raise ValueError("Refresh token has been revoked")
 
     username = payload.get("sub")
-    role = payload.get("role")
-    if not username or not role:
+    if not username:
         raise ValueError("Invalid refresh token")
 
     result = await db.execute(select(Employee).where(Employee.username == username))
@@ -85,8 +86,10 @@ async def refresh_access_token(
         if ttl > 0:
             await redis.setex(f"token_blacklist:{jti}", ttl, "1")
 
-    access_token, _ = create_access_token(username, role)
-    refresh_token, _ = create_refresh_token(username, role)
+    access_token, _ = create_access_token(
+        employee.username, employee.role.value, employee_id=str(employee.id)
+    )
+    refresh_token, _ = create_refresh_token(employee.username, employee.role.value)
 
     return TokenResponse(
         access_token=access_token, refresh_token=refresh_token

@@ -1,10 +1,14 @@
 import uuid
 import json
-from datetime import datetime, timezone
+import inspect
+import re
+from datetime import date, datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from fastapi import HTTPException, Request
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
 
@@ -24,6 +28,7 @@ from app.models.order import (
     OrderInventoryAllocationStatus,
     OrderItem,
     OrderStatus,
+    OrderStatusLog,
 )
 from app.models import order as order_models
 from app.models.product import PriceChangeLog, PriceType, Product, ProductStatus
@@ -38,10 +43,12 @@ from app.schemas.customer import CustomerLevelCreate
 from app.schemas.order import (
     OrderActionRequest,
     OrderCreate,
+    OrderCompleteRequest,
     OrderItemCreate,
     OrderOut,
     OrderShipmentAllocation,
     OrderShipRequest,
+    OrderStockOutRequest,
 )
 from app.schemas import order as order_schemas
 from app.schemas.product import (
@@ -58,6 +65,268 @@ from app.api.v1 import upload as upload_api
 from app.api.v1 import product as product_api
 
 
+def _normalize_sql_fragment(value: str) -> str:
+    normalized = " ".join(value.split()).lower()
+    return (
+        normalized.replace("( ", "(")
+        .replace(" )", ")")
+        .replace("[ ", "[")
+        .replace(" ]", "]")
+    )
+
+
+def _extract_create_table_block(sql: str, table_name: str) -> str:
+    match = re.search(
+        rf"CREATE TABLE IF NOT EXISTS {table_name}\s*\((.*?)\n\);",
+        sql,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    assert match is not None, f"missing CREATE TABLE block for {table_name}"
+    return _normalize_sql_fragment(match.group(1))
+
+
+def test_order_delivery_migration_sql_contract():
+    from app.models.order_delivery import OrderDelivery, OrderDeliveryEvent
+
+    migration_path = (
+        Path(__file__).parents[1]
+        / "migrations"
+        / "incremental"
+        / "2026-07-19_新增订单配送管理.sql"
+    )
+    sql = migration_path.read_text(encoding="utf-8")
+    normalized_sql = _normalize_sql_fragment(sql)
+
+    assert normalized_sql.startswith("begin;")
+    assert normalized_sql.endswith("commit;")
+    enum_contracts = {
+        "order_delivery_status": "('delivering', 'signed')",
+        "order_delivery_event_type": (
+            "('assigned', 'reassigned', 'exception', 'signed')"
+        ),
+        "order_delivery_exception_type": (
+            "('customer_absent', 'customer_refused', 'invalid_contact', 'other')"
+        ),
+    }
+    for enum_name, enum_values in enum_contracts.items():
+        enum_guard = (
+            f"do $$ begin create type {enum_name} as enum {enum_values}; "
+            "exception when duplicate_object then null; end $$;"
+        )
+        assert enum_guard in normalized_sql
+
+    assert normalized_sql.count("when duplicate_object then null;") == 3
+    assert "create table if not exists order_deliveries (" in normalized_sql
+    assert "create table if not exists order_delivery_events (" in normalized_sql
+    assert normalized_sql.count("create index if not exists ") == 4
+    assert "default gen_random_uuid()" not in normalized_sql
+    assert "default uuid_generate_v4()" not in normalized_sql
+
+    mutation_scan_sql = re.sub(r"'(?:''|[^'])*'", "''", sql)
+    assert re.search(
+        r"\b(drop|alter|insert|update|delete|truncate)\b",
+        mutation_scan_sql,
+        flags=re.IGNORECASE,
+    ) is None
+
+    delivery_table_sql = _extract_create_table_block(sql, "order_deliveries")
+    event_table_sql = _extract_create_table_block(sql, "order_delivery_events")
+
+    delivery_columns = (
+        "id uuid primary key",
+        "order_id uuid not null references orders(id)",
+        "delivery_employee_id uuid not null references employees(id)",
+        "delivery_employee_name character varying(100) not null",
+        "status order_delivery_status not null default 'delivering'",
+        "recipient_name character varying(100) not null",
+        "recipient_phone character varying(20) not null",
+        "delivery_address character varying(500) not null",
+        "assigned_at timestamp without time zone not null default now()",
+        "assigned_by_id uuid not null references employees(id)",
+        "assigned_by_name character varying(100) not null",
+        "signer_name character varying(100)",
+        "proof_image_urls json",
+        "sign_remark text",
+        "signed_at timestamp without time zone",
+        "signed_by_id uuid references employees(id)",
+        "signed_by_name character varying(100)",
+        "created_at timestamp without time zone not null default now()",
+        "updated_at timestamp without time zone not null default now()",
+    )
+    for column_contract in delivery_columns:
+        assert column_contract in delivery_table_sql
+
+    signed_check = (
+        "constraint ck_order_deliveries_signed_fields check "
+        "(status <> 'signed' or (signer_name is not null and signed_at is not null "
+        "and signed_by_id is not null and signed_by_name is not null))"
+    )
+    delivering_check = (
+        "constraint ck_order_deliveries_delivering_fields check "
+        "(status <> 'delivering' or (signer_name is null and proof_image_urls is null "
+        "and sign_remark is null and signed_at is null and signed_by_id is null "
+        "and signed_by_name is null))"
+    )
+    proof_images_check = (
+        "constraint ck_order_deliveries_proof_image_urls_array check "
+        "(proof_image_urls is null or json_typeof(proof_image_urls) = 'array')"
+    )
+    assert signed_check in delivery_table_sql
+    assert delivering_check in delivery_table_sql
+    assert proof_images_check in delivery_table_sql
+    assert "constraint uq_order_deliveries_order_id unique (order_id)" in delivery_table_sql
+
+    event_columns = (
+        "id uuid primary key",
+        "delivery_id uuid not null references order_deliveries(id)",
+        "event_type order_delivery_event_type not null",
+        "from_employee_id uuid references employees(id)",
+        "from_employee_name character varying(100)",
+        "to_employee_id uuid references employees(id)",
+        "to_employee_name character varying(100)",
+        "exception_type order_delivery_exception_type",
+        "remark text",
+        "operator_id uuid not null references employees(id)",
+        "operator_name character varying(100) not null",
+        "created_at timestamp without time zone not null default now()",
+    )
+    for column_contract in event_columns:
+        assert column_contract in event_table_sql
+
+    model_indexes = {
+        index.name: (index.table.name, tuple(index.columns.keys()))
+        for table in (OrderDelivery.__table__, OrderDeliveryEvent.__table__)
+        for index in table.indexes
+    }
+    expected_indexes = {
+        "ix_order_deliveries_delivery_employee_status": (
+            "order_deliveries",
+            ("delivery_employee_id", "status"),
+        ),
+        "ix_order_deliveries_status_signed_at": (
+            "order_deliveries",
+            ("status", "signed_at"),
+        ),
+        "ix_order_delivery_events_delivery_created_at": (
+            "order_delivery_events",
+            ("delivery_id", "created_at"),
+        ),
+        "ix_order_delivery_events_event_type_delivery_created_at": (
+            "order_delivery_events",
+            ("event_type", "delivery_id", "created_at"),
+        ),
+    }
+    assert model_indexes == expected_indexes
+    for index_name, (table_name, columns) in model_indexes.items():
+        index_contract = (
+            f"create index if not exists {index_name} on "
+            f"{table_name}({', '.join(columns)});"
+        )
+        assert index_contract in normalized_sql
+
+    model_constraint_names = {
+        constraint.name
+        for constraint in OrderDelivery.__table__.constraints
+        if constraint.name is not None
+    }
+    expected_constraint_names = {
+        "uq_order_deliveries_order_id",
+        "ck_order_deliveries_signed_fields",
+        "ck_order_deliveries_delivering_fields",
+        "ck_order_deliveries_proof_image_urls_array",
+    }
+    assert model_constraint_names == expected_constraint_names
+    for constraint_name in model_constraint_names:
+        assert f"constraint {constraint_name} " in delivery_table_sql
+
+    comment_contracts = (
+        "comment on table order_deliveries is '订单配送记录';",
+        "comment on table order_delivery_events is '订单配送事件记录';",
+        "comment on column order_deliveries.delivery_employee_id is '当前配送员id';",
+        "comment on column order_deliveries.recipient_name is '收货联系人快照';",
+        "comment on column order_deliveries.status is '配送状态';",
+        "comment on column order_deliveries.signed_at is '签收时间';",
+        "comment on column order_delivery_events.event_type is '配送事件类型';",
+        "comment on column order_delivery_events.exception_type is '配送异常类型';",
+    )
+    for comment_contract in comment_contracts:
+        assert comment_contract in normalized_sql
+    assert normalized_sql.index("comment on table order_deliveries") > normalized_sql.index(
+        "create table if not exists order_deliveries"
+    )
+    assert normalized_sql.index(
+        "comment on table order_delivery_events"
+    ) > normalized_sql.index("create table if not exists order_delivery_events")
+    assert "create trigger" not in normalized_sql
+
+    postcondition_tokens = (
+        "array_agg(e.enumlabel order by e.enumsortorder)",
+        "from pg_type t join pg_enum e on e.enumtypid = t.oid",
+        "to_regclass(format('%i.%i', current_schema(), required_table))",
+        "from pg_constraint c",
+        "from pg_index i",
+        "join pg_attribute a",
+        "i.indkey::smallint[]",
+        "raise exception",
+        "array['delivering', 'signed']::text[]",
+        "array['assigned', 'reassigned', 'exception', 'signed']::text[]",
+        "array['customer_absent', 'customer_refused', 'invalid_contact', 'other']::text[]",
+    )
+    for token in postcondition_tokens:
+        assert token in normalized_sql
+    for constraint_name in (
+        "uq_order_deliveries_order_id",
+        "ck_order_deliveries_signed_fields",
+        "ck_order_deliveries_delivering_fields",
+        "ck_order_deliveries_proof_image_urls_array",
+        "order_deliveries_order_id_fkey",
+        "order_deliveries_delivery_employee_id_fkey",
+        "order_deliveries_assigned_by_id_fkey",
+        "order_deliveries_signed_by_id_fkey",
+        "order_delivery_events_delivery_id_fkey",
+        "order_delivery_events_from_employee_id_fkey",
+        "order_delivery_events_to_employee_id_fkey",
+        "order_delivery_events_operator_id_fkey",
+    ):
+        assert constraint_name in normalized_sql
+    for index_name in expected_indexes:
+        assert normalized_sql.count(index_name) >= 2
+
+
+def test_order_payment_migration_sql_contract():
+    migration_path = (
+        Path(__file__).parents[1]
+        / "migrations"
+        / "incremental"
+        / "2026-07-20_新增订单收款凭证.sql"
+    )
+    sql = migration_path.read_text(encoding="utf-8")
+    normalized_sql = _normalize_sql_fragment(sql)
+
+    assert normalized_sql.startswith("begin;")
+    assert normalized_sql.endswith("commit;")
+    assert "add column if not exists paid_amount numeric(12, 2)" in normalized_sql
+    assert "add column if not exists payment_proof_image_urls json" in normalized_sql
+    assert "set paid_amount = total_amount" in normalized_sql
+    assert "set payment_proof_image_urls = '[]'::json" in normalized_sql
+    assert "ck_orders_paid_amount_range" in normalized_sql
+    assert "paid_amount > 0 and paid_amount <= total_amount" in normalized_sql
+    assert "ck_orders_payment_proof_image_urls_array" in normalized_sql
+    assert "json_typeof(payment_proof_image_urls) = 'array'" in normalized_sql
+    assert "comment on column orders.paid_amount" in normalized_sql
+    assert "comment on column orders.payment_proof_image_urls" in normalized_sql
+
+    model_constraint_names = {
+        constraint.name
+        for constraint in Order.__table__.constraints
+        if constraint.name is not None
+    }
+    assert {
+        "ck_orders_paid_amount_range",
+        "ck_orders_payment_proof_image_urls_array",
+    }.issubset(model_constraint_names)
+
+
 class FakeScalarResult:
     def __init__(self, values):
         self._values = values
@@ -65,14 +334,30 @@ class FakeScalarResult:
     def all(self):
         return list(self._values)
 
+    def one_or_none(self):
+        if not self._values:
+            return None
+        if len(self._values) != 1:
+            raise AssertionError("Expected at most one mapping row")
+        return self._values[0]
+
+
+class StrictUniqueMappingResult(FakeScalarResult):
+    def all(self):
+        raise AssertionError("unique detail query must use mappings().one_or_none()")
+
 
 class FakeResult:
-    def __init__(self, one=None, values=None, scalar=None):
+    def __init__(self, one=None, values=None, scalar=None, mappings=None):
         self._one = one
         self._values = values or []
         self._scalar = scalar
+        self._mappings = mappings or []
 
     def scalar_one_or_none(self):
+        return self._one
+
+    def one_or_none(self):
         return self._one
 
     def scalar(self):
@@ -84,6 +369,19 @@ class FakeResult:
     def all(self):
         return list(self._values)
 
+    def mappings(self):
+        return FakeScalarResult(self._mappings)
+
+
+class StrictRowResult(FakeResult):
+    def scalar_one_or_none(self):
+        raise AssertionError("row query must use one_or_none()")
+
+
+class StrictUniqueMappingQueryResult(FakeResult):
+    def mappings(self):
+        return StrictUniqueMappingResult(self._mappings)
+
 
 class QueueDb:
     def __init__(self, results=None):
@@ -92,9 +390,11 @@ class QueueDb:
         self.flushed = False
         self.refreshed = []
         self.statements = []
+        self.statement_params = []
 
     async def execute(self, statement):
         self.statements.append(str(statement))
+        self.statement_params.append(statement.compile().params)
         if not self.results:
             raise AssertionError("Unexpected query")
         return self.results.pop(0)
@@ -114,6 +414,47 @@ class QueueDb:
     async def refresh(self, obj, attribute_names=None):
         self.refreshed.append(obj)
         return None
+
+
+@pytest.mark.asyncio
+async def test_get_db_rollback_after_yield_exception_does_not_commit(monkeypatch):
+    from app.core import database
+
+    class FakeSession:
+        def __init__(self):
+            self.commit_calls = 0
+            self.rollback_calls = 0
+
+        async def commit(self):
+            self.commit_calls += 1
+
+        async def rollback(self):
+            self.rollback_calls += 1
+
+    class FakeSessionContext:
+        def __init__(self, session):
+            self.session = session
+
+        async def __aenter__(self):
+            return self.session
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    session = FakeSession()
+    monkeypatch.setattr(
+        database,
+        "async_session_factory",
+        lambda: FakeSessionContext(session),
+    )
+    dependency = database.get_db()
+
+    assert await anext(dependency) is session
+    with pytest.raises(RuntimeError, match="request failed"):
+        await dependency.athrow(RuntimeError("request failed"))
+
+    assert session.rollback_calls == 1
+    assert session.commit_calls == 0
 
 
 class CreateOrderDb(QueueDb):
@@ -821,6 +1162,310 @@ def test_order_contract_exposes_shipper_for_audit():
     assert "shipped_by" not in Order.__table__.columns
 
 
+def test_order_delivery_contract_uses_lightweight_statuses():
+    from app.models.order_delivery import (
+        OrderDelivery,
+        OrderDeliveryEvent,
+        OrderDeliveryEventType,
+        OrderDeliveryExceptionType,
+        OrderDeliveryStatus,
+    )
+
+    assert {item.value for item in OrderDeliveryStatus} == {"delivering", "signed"}
+    assert {item.value for item in OrderDeliveryEventType} == {
+        "assigned",
+        "reassigned",
+        "exception",
+        "signed",
+    }
+    assert {item.value for item in OrderDeliveryExceptionType} == {
+        "customer_absent",
+        "customer_refused",
+        "invalid_contact",
+        "other",
+    }
+    assert {
+        "order_id",
+        "delivery_employee_id",
+        "delivery_employee_name",
+        "status",
+        "recipient_name",
+        "recipient_phone",
+        "delivery_address",
+        "assigned_at",
+        "assigned_by_id",
+        "assigned_by_name",
+        "signer_name",
+        "proof_image_urls",
+        "sign_remark",
+        "signed_at",
+        "signed_by_id",
+        "signed_by_name",
+    }.issubset(OrderDelivery.__table__.columns.keys())
+    assert {
+        "delivery_id",
+        "event_type",
+        "from_employee_id",
+        "from_employee_name",
+        "to_employee_id",
+        "to_employee_name",
+        "exception_type",
+        "remark",
+        "operator_id",
+        "operator_name",
+        "created_at",
+    }.issubset(OrderDeliveryEvent.__table__.columns.keys())
+    assert {constraint.name for constraint in OrderDelivery.__table__.constraints} >= {
+        "uq_order_deliveries_order_id",
+        "ck_order_deliveries_signed_fields",
+        "ck_order_deliveries_delivering_fields",
+        "ck_order_deliveries_proof_image_urls_array",
+    }
+    check_expressions = {
+        constraint.name: _normalize_sql_fragment(str(constraint.sqltext))
+        for constraint in OrderDelivery.__table__.constraints
+        if constraint.name and constraint.name.startswith("ck_order_deliveries_")
+    }
+    assert check_expressions == {
+        "ck_order_deliveries_signed_fields": (
+            "status <> 'signed' or (signer_name is not null and signed_at is not null "
+            "and signed_by_id is not null and signed_by_name is not null)"
+        ),
+        "ck_order_deliveries_delivering_fields": (
+            "status <> 'delivering' or (signer_name is null and proof_image_urls is null "
+            "and sign_remark is null and signed_at is null and signed_by_id is null "
+            "and signed_by_name is null)"
+        ),
+        "ck_order_deliveries_proof_image_urls_array": (
+            "proof_image_urls is null or json_typeof(proof_image_urls) = 'array'"
+        ),
+    }
+    status_column = OrderDelivery.__table__.c.status
+    assert status_column.default is not None
+    assert status_column.default.arg == OrderDeliveryStatus.delivering
+    status_default = status_column.server_default
+    assert status_default is not None
+    assert str(status_default.arg).strip("'") == "delivering"
+    assert {
+        index.name: tuple(index.columns.keys())
+        for index in OrderDelivery.__table__.indexes
+    } == {
+        "ix_order_deliveries_delivery_employee_status": (
+            "delivery_employee_id",
+            "status",
+        ),
+        "ix_order_deliveries_status_signed_at": ("status", "signed_at"),
+    }
+    assert {
+        index.name: tuple(index.columns.keys())
+        for index in OrderDeliveryEvent.__table__.indexes
+    } == {
+        "ix_order_delivery_events_delivery_created_at": (
+            "delivery_id",
+            "created_at",
+        ),
+        "ix_order_delivery_events_event_type_delivery_created_at": (
+            "event_type",
+            "delivery_id",
+            "created_at",
+        ),
+    }
+    assert Order.delivery.property.uselist is False
+    assert Order.delivery.property.back_populates == "order"
+    assert OrderDelivery.order.property.back_populates == "delivery"
+
+
+def test_delivery_schema_validates_requests_and_defaults():
+    from app.models.order_delivery import OrderDeliveryExceptionType
+    from app.schemas.order import OrderStockOutRequest
+    from app.schemas.order_delivery import (
+        OrderDeliveryExceptionRequest,
+        OrderDeliveryReassignRequest,
+        OrderDeliverySignRequest,
+    )
+
+    employee_uuid = uuid.uuid4()
+    employee_id = str(employee_uuid)
+    stock_out = OrderStockOutRequest(
+        delivery_employee_id=employee_id,
+        recipient_name="  李四  ",
+        recipient_phone=" 13800000000 ",
+        delivery_address="  客户本次收货地址  ",
+    )
+    assert stock_out.delivery_employee_id == employee_uuid
+    assert stock_out.recipient_name == "李四"
+    assert stock_out.recipient_phone == "13800000000"
+    assert stock_out.delivery_address == "客户本次收货地址"
+
+    for field_name in ("delivery_employee_id", "recipient_name", "recipient_phone", "delivery_address"):
+        payload = {
+            "delivery_employee_id": employee_id,
+            "recipient_name": "李四",
+            "recipient_phone": "13800000000",
+            "delivery_address": "客户本次收货地址",
+        }
+        payload[field_name] = "   "
+        with pytest.raises(ValidationError):
+            OrderStockOutRequest(**payload)
+
+    sign_request = OrderDeliverySignRequest(signer_name="  王五  ")
+    assert sign_request.signer_name == "王五"
+    assert sign_request.proof_image_urls == []
+    with pytest.raises(ValidationError):
+        OrderDeliverySignRequest(signer_name="   ")
+
+    assert (
+        OrderDeliveryReassignRequest(
+            delivery_employee_id=employee_id,
+            reason=" " * 600,
+        ).reason
+        is None
+    )
+    reassign_request = OrderDeliveryReassignRequest(
+        delivery_employee_id=employee_id,
+        reason="  临时调整  ",
+    )
+    assert reassign_request.delivery_employee_id == employee_uuid
+    assert reassign_request.reason == "临时调整"
+
+    with pytest.raises(ValidationError, match="说明"):
+        OrderDeliveryExceptionRequest(
+            exception_type=OrderDeliveryExceptionType.other,
+            remark="   ",
+        )
+    exception_request = OrderDeliveryExceptionRequest(
+        exception_type=OrderDeliveryExceptionType.customer_absent,
+        remark="  客户暂时不在  ",
+    )
+    assert exception_request.remark == "客户暂时不在"
+
+    with pytest.raises(ValidationError):
+        OrderDeliveryReassignRequest(
+            delivery_employee_id=employee_id,
+            reason="x" * 501,
+        )
+
+
+def test_delivery_schema_rejects_non_string_trim_inputs_with_validation_errors():
+    from app.models.order_delivery import OrderDeliveryExceptionType
+    from app.schemas.order import OrderStockOutRequest
+    from app.schemas.order_delivery import (
+        OrderDeliveryExceptionRequest,
+        OrderDeliveryReassignRequest,
+        OrderDeliverySignRequest,
+    )
+
+    employee_id = str(uuid.uuid4())
+    stock_out_payload = {
+        "delivery_employee_id": employee_id,
+        "recipient_name": "李四",
+        "recipient_phone": "13800000000",
+        "delivery_address": "客户本次收货地址",
+    }
+
+    with pytest.raises(ValidationError):
+        OrderStockOutRequest(**{**stock_out_payload, "delivery_employee_id": 123})
+    with pytest.raises(ValidationError):
+        OrderDeliveryReassignRequest(delivery_employee_id=123)
+    with pytest.raises(ValidationError):
+        OrderDeliverySignRequest(signer_name=123)
+    with pytest.raises(ValidationError):
+        OrderDeliveryExceptionRequest(
+            exception_type=OrderDeliveryExceptionType.customer_absent,
+            remark=123,
+        )
+    with pytest.raises(ValidationError):
+        OrderDeliveryReassignRequest(
+            delivery_employee_id=employee_id,
+            reason=123,
+        )
+
+
+def test_delivery_schema_exposes_output_contracts():
+    from app.schemas.order import OrderOut
+    from app.schemas.order_delivery import (
+        OrderDeliveryArchiveOut,
+        OrderDeliveryCurrentGroupOut,
+        OrderDeliveryDetailOut,
+        OrderDeliveryEmployeeOptionOut,
+        OrderDeliveryEventOut,
+        OrderDeliverySummaryOut,
+    )
+
+    assert {"id", "name"}.issubset(OrderDeliveryEmployeeOptionOut.model_fields)
+    assert {"event_type", "operator_id", "operator_name", "created_at"}.issubset(
+        OrderDeliveryEventOut.model_fields
+    )
+    assert {
+        "id",
+        "status",
+        "delivery_employee_id",
+        "delivery_employee_name",
+        "recipient_name",
+        "recipient_phone",
+        "delivery_address",
+    }.issubset(OrderDeliverySummaryOut.model_fields)
+    assert {"events", "proof_image_urls", "order_no", "customer_name"}.issubset(
+        OrderDeliveryDetailOut.model_fields
+    )
+    assert {
+        "delivery_employee_id",
+        "delivery_employee_name",
+        "order_count",
+        "customer_count",
+        "product_quantity",
+        "total_amount",
+        "exception_order_count",
+        "deliveries",
+    }.issubset(OrderDeliveryCurrentGroupOut.model_fields)
+    assert {"order_no", "customer_name", "signer_name", "signed_at"}.issubset(
+        OrderDeliveryArchiveOut.model_fields
+    )
+    assert "delivery" in OrderOut.model_fields
+
+
+def test_delivery_schema_normalizes_nullable_proof_images():
+    from app.models.order_delivery import OrderDelivery, OrderDeliveryStatus
+    from app.schemas.order_delivery import (
+        OrderDeliveryArchiveOut,
+        OrderDeliveryDetailOut,
+    )
+
+    now = datetime.now(timezone.utc)
+    delivery = OrderDelivery(
+        id=uuid.uuid4(),
+        order_id=uuid.uuid4(),
+        delivery_employee_id=uuid.uuid4(),
+        delivery_employee_name="配送员",
+        status=OrderDeliveryStatus.signed,
+        recipient_name="李四",
+        recipient_phone="13800000000",
+        delivery_address="客户本次收货地址",
+        assigned_at=now,
+        assigned_by_id=uuid.uuid4(),
+        assigned_by_name="管理员",
+        signer_name="王五",
+        proof_image_urls=None,
+        signed_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+    delivery.order_no = "ORD-DELIVERY-001"
+    delivery.customer_id = uuid.uuid4()
+    delivery.customer_name = "测试客户"
+    delivery.total_amount = Decimal("100.00")
+    delivery.product_quantity = 2
+    delivery.order_status = OrderStatus.delivered_unpaid
+    delivery.events = []
+
+    for output_schema in (OrderDeliveryDetailOut, OrderDeliveryArchiveOut):
+        output = output_schema.model_validate(delivery)
+        assert output.id == str(delivery.id)
+        assert output.delivery_employee_id == str(delivery.delivery_employee_id)
+        assert output.status == OrderDeliveryStatus.signed
+        assert output.proof_image_urls == []
+
+
 def test_order_inventory_allocation_model_tracks_warehouse_quantity():
     allocation_model = getattr(order_models, "OrderInventoryAllocation", None)
 
@@ -866,7 +1511,7 @@ def test_cancel_requires_non_blank_reason():
         OrderActionRequest(cancel_reason="   ")
 
 
-def test_order_fulfillment_routes_match_state_machine():
+def test_delivery_route_order_fulfillment_matches_state_machine():
     order_put_paths = {
         route.path
         for route in app.routes
@@ -878,10 +1523,746 @@ def test_order_fulfillment_routes_match_state_machine():
         "/api/v1/orders/{order_id}/start-shipping",
         "/api/v1/orders/{order_id}/shipping-allocations",
         "/api/v1/orders/{order_id}/stock-out",
-        "/api/v1/orders/{order_id}/deliver",
         "/api/v1/orders/{order_id}/complete",
         "/api/v1/orders/{order_id}/cancel",
     }
+
+
+def test_delivery_route_contract_and_authorization_dependencies():
+    delivery_routes = [
+        route
+        for route in app.routes
+        if getattr(route, "path", "").startswith("/api/v1/deliveries")
+    ]
+    route_contract = {
+        (route.path, method)
+        for route in delivery_routes
+        for method in route.methods
+    }
+
+    assert route_contract == {
+        ("/api/v1/deliveries/employee-options", "GET"),
+        ("/api/v1/deliveries/current", "GET"),
+        ("/api/v1/deliveries/archive", "GET"),
+        ("/api/v1/deliveries/{delivery_id}", "GET"),
+        ("/api/v1/deliveries/{delivery_id}/reassign", "PUT"),
+        ("/api/v1/deliveries/{delivery_id}/exceptions", "POST"),
+        ("/api/v1/deliveries/{delivery_id}/sign", "PUT"),
+    }
+
+    route_by_contract = {
+        (route.path, next(iter(route.methods))): route for route in delivery_routes
+    }
+    for path, method in route_contract:
+        dependency_names = {
+            dependency.call.__name__
+            for dependency in route_by_contract[(path, method)].dependant.dependencies
+            if dependency.call is not None
+        }
+        expected_dependency = (
+            "require_admin" if path.endswith("/reassign") else "get_current_user"
+        )
+        assert expected_dependency in dependency_names
+
+    delivery_paths = [route.path for route in delivery_routes]
+    detail_index = delivery_paths.index("/api/v1/deliveries/{delivery_id}")
+    assert delivery_paths.index("/api/v1/deliveries/employee-options") < detail_index
+    assert delivery_paths.index("/api/v1/deliveries/current") < detail_index
+    assert delivery_paths.index("/api/v1/deliveries/archive") < detail_index
+
+
+def test_delivery_api_current_user_parameters_are_required():
+    from app.api.v1 import order_delivery as delivery_api
+
+    for handler in (
+        delivery_api.employee_options,
+        delivery_api.current_deliveries,
+        delivery_api.delivery_archive,
+        delivery_api.delivery_detail,
+        delivery_api.create_delivery_exception,
+        delivery_api.sign_delivery,
+    ):
+        assert (
+            inspect.signature(handler).parameters["current_user"].default
+            is inspect.Parameter.empty
+        )
+
+
+@pytest.mark.asyncio
+async def test_complete_route_forwards_payment_request(monkeypatch):
+    from app.api.v1 import order as order_api
+
+    request = OrderCompleteRequest(
+        paid_amount="200.00",
+        payment_proof_image_urls=["https://example.com/payment.jpg"],
+    )
+    order = Order(id=uuid.uuid4())
+    expected_order = object()
+    received = {}
+
+    async def transition(
+        db,
+        order_id,
+        target_status,
+        operator,
+        *,
+        complete_request,
+    ):
+        received["transition"] = (
+            db,
+            order_id,
+            target_status,
+            operator,
+            complete_request,
+        )
+        return order
+
+    async def get_refreshed_order(db, order_id):
+        received["get"] = (db, order_id)
+        return expected_order
+
+    monkeypatch.setattr(order_api, "transition_order", transition)
+    monkeypatch.setattr(order_api, "get_order", get_refreshed_order)
+    db = object()
+    user = type("User", (), {"username": "cashier"})()
+
+    response = await order_api.complete(str(order.id), request, user, db)
+
+    assert response.data is expected_order
+    assert received["transition"] == (
+        db,
+        str(order.id),
+        OrderStatus.completed,
+        "cashier",
+        request,
+    )
+    assert received["get"] == (db, str(order.id))
+
+
+@pytest.mark.asyncio
+async def test_stock_out_route_forwards_request_and_employee(monkeypatch):
+    from app.api.v1 import order as order_api
+
+    employee = Employee(
+        id=uuid.uuid4(),
+        username="stock-user",
+        name="出库员",
+        password_hash="hash",
+        role=EmployeeRole.normal,
+        status=EmployeeStatus.active,
+    )
+    request = OrderStockOutRequest(
+        delivery_employee_id=str(uuid.uuid4()),
+        recipient_name="收货人",
+        recipient_phone="13800000000",
+        delivery_address="测试地址",
+    )
+    order = Order(id=uuid.uuid4())
+    expected_order = object()
+    received = {}
+
+    async def transition(
+        db,
+        order_id,
+        target_status,
+        operator,
+        *,
+        stock_out_request,
+    ):
+        received["transition"] = (
+            db,
+            order_id,
+            target_status,
+            operator,
+            stock_out_request,
+        )
+        return order
+
+    async def get_refreshed_order(db, order_id):
+        received["get"] = (db, order_id)
+        return expected_order
+
+    monkeypatch.setattr(order_api, "transition_order", transition)
+    monkeypatch.setattr(order_api, "get_order", get_refreshed_order)
+    db = object()
+
+    response = await order_api.stock_out(str(order.id), request, employee, db)
+
+    assert response.data is expected_order
+    assert received["transition"] == (
+        db,
+        str(order.id),
+        OrderStatus.stocked_out,
+        employee,
+        request,
+    )
+    assert received["get"] == (db, str(order.id))
+
+
+@pytest.mark.asyncio
+async def test_delivery_api_delegates_queries_and_mutations(monkeypatch):
+    from app.api.v1 import order_delivery as delivery_api
+    from app.models.order_delivery import OrderDeliveryExceptionType
+    from app.schemas.order_delivery import (
+        OrderDeliveryExceptionRequest,
+        OrderDeliveryReassignRequest,
+        OrderDeliverySignRequest,
+    )
+
+    employee = Employee(
+        id=uuid.uuid4(),
+        username="delivery-user",
+        name="配送员",
+        password_hash="hash",
+        role=EmployeeRole.normal,
+        status=EmployeeStatus.active,
+    )
+    admin = Employee(
+        id=uuid.uuid4(),
+        username="admin",
+        name="管理员",
+        password_hash="hash",
+        role=EmployeeRole.admin,
+        status=EmployeeStatus.active,
+    )
+    delivery_id = uuid.uuid4()
+    reassign_request = OrderDeliveryReassignRequest(
+        delivery_employee_id=str(uuid.uuid4()), reason="临时调整"
+    )
+    exception_request = OrderDeliveryExceptionRequest(
+        exception_type=OrderDeliveryExceptionType.customer_absent,
+        remark="客户不在",
+    )
+    sign_request = OrderDeliverySignRequest(
+        signer_name="王老板", proof_image_urls=["proof.png"], remark="完好"
+    )
+    expected = {
+        "options": [object()],
+        "current": [object()],
+        "archive": object(),
+        "detail": object(),
+    }
+    received = {}
+
+    async def employee_options(db):
+        received["options"] = (db,)
+        return expected["options"]
+
+    async def current(db, current_user, **filters):
+        received["current"] = (db, current_user, filters)
+        return expected["current"]
+
+    async def archive(db, current_user, **filters):
+        received["archive"] = (db, current_user, filters)
+        return expected["archive"]
+
+    async def detail(db, received_delivery_id, current_user):
+        received.setdefault("detail", []).append(
+            (db, received_delivery_id, current_user)
+        )
+        return expected["detail"]
+
+    async def reassign(db, received_delivery_id, request, current_user):
+        received["reassign"] = (db, received_delivery_id, request, current_user)
+
+    async def exception(db, received_delivery_id, request, current_user):
+        received["exception"] = (db, received_delivery_id, request, current_user)
+
+    async def sign(db, received_delivery_id, request, current_user):
+        received["sign"] = (db, received_delivery_id, request, current_user)
+
+    monkeypatch.setattr(delivery_api.order_delivery_service, "list_active_employee_options", employee_options)
+    monkeypatch.setattr(delivery_api.order_delivery_service, "list_current_deliveries", current)
+    monkeypatch.setattr(delivery_api.order_delivery_service, "list_delivery_archive", archive)
+    monkeypatch.setattr(delivery_api.order_delivery_service, "get_delivery_detail", detail)
+    monkeypatch.setattr(delivery_api.order_delivery_service, "reassign_delivery", reassign)
+    monkeypatch.setattr(delivery_api.order_delivery_service, "record_delivery_exception", exception)
+    monkeypatch.setattr(delivery_api.order_delivery_service, "sign_delivery", sign)
+    db = object()
+
+    options_response = await delivery_api.employee_options(employee, db)
+    current_response = await delivery_api.current_deliveries(
+        current_user=employee,
+        order_keyword="ORD",
+        customer_keyword="客户",
+        employee_id=employee.id,
+        has_exception=True,
+        db=db,
+    )
+    archive_response = await delivery_api.delivery_archive(
+        current_user=employee,
+        page=2,
+        page_size=30,
+        employee_id=employee.id,
+        order_keyword="ORD",
+        customer_keyword="客户",
+        signer_keyword="签收人",
+        signed_from=date(2026, 7, 1),
+        signed_to=date(2026, 7, 19),
+        db=db,
+    )
+    detail_response = await delivery_api.delivery_detail(delivery_id, employee, db)
+    reassign_response = await delivery_api.reassign_delivery(
+        delivery_id, reassign_request, admin, db
+    )
+    exception_response = await delivery_api.create_delivery_exception(
+        delivery_id, exception_request, employee, db
+    )
+    sign_response = await delivery_api.sign_delivery(
+        delivery_id, sign_request, employee, db
+    )
+
+    assert options_response.data is expected["options"]
+    assert current_response.data is expected["current"]
+    assert archive_response.data is expected["archive"]
+    assert detail_response.data is expected["detail"]
+    assert reassign_response.data is expected["detail"]
+    assert exception_response.data is expected["detail"]
+    assert sign_response.data is expected["detail"]
+    assert received["options"] == (db,)
+    assert received["current"] == (
+        db,
+        employee,
+        {
+            "order_keyword": "ORD",
+            "customer_keyword": "客户",
+            "employee_id": employee.id,
+            "has_exception": True,
+        },
+    )
+    assert received["archive"] == (
+        db,
+        employee,
+        {
+            "page": 2,
+            "page_size": 30,
+            "employee_id": employee.id,
+            "order_keyword": "ORD",
+            "customer_keyword": "客户",
+            "signer_keyword": "签收人",
+            "signed_from": date(2026, 7, 1),
+            "signed_to": date(2026, 7, 19),
+        },
+    )
+    assert received["reassign"] == (db, delivery_id, reassign_request, admin)
+    assert received["exception"] == (db, delivery_id, exception_request, employee)
+    assert received["sign"] == (db, delivery_id, sign_request, employee)
+    assert received["detail"] == [
+        (db, delivery_id, employee),
+        (db, delivery_id, admin),
+        (db, delivery_id, employee),
+        (db, delivery_id, employee),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_delivery_api_employee_options_service_queries_active_employees():
+    from app.services import order_delivery_service
+
+    first_id = uuid.uuid4()
+    second_id = uuid.uuid4()
+    db = QueueDb(
+        [FakeResult(values=[(first_id, "甲配送员"), (second_id, "乙配送员")])]
+    )
+
+    options = await order_delivery_service.list_active_employee_options(db)
+
+    assert [option.model_dump() for option in options] == [
+        {"id": str(first_id), "name": "甲配送员"},
+        {"id": str(second_id), "name": "乙配送员"},
+    ]
+    assert EmployeeStatus.active in db.statement_params[0].values()
+    assert "ORDER BY employees.name, employees.id" in db.statements[0]
+    selected_columns = db.statements[0].split("FROM", 1)[0]
+    assert "employees.id" in selected_columns
+    assert "employees.name" in selected_columns
+    assert "employees.username" not in selected_columns
+    assert "employees.password_hash" not in selected_columns
+
+
+def _delivery_api_test_client(current_user):
+    from app.core.database import get_db
+    from app.core.deps import get_current_user
+
+    async def override_current_user():
+        return current_user
+
+    async def override_db():
+        return object()
+
+    app.dependency_overrides[get_current_user] = override_current_user
+    app.dependency_overrides[get_db] = override_db
+    return TestClient(app)
+
+
+def _delivery_current_response_payload(employee, now):
+    delivery_id = uuid.uuid4()
+    order_id = uuid.uuid4()
+    customer_id = uuid.uuid4()
+    delivery = {
+        "id": delivery_id,
+        "status": "delivering",
+        "delivery_employee_id": employee.id,
+        "delivery_employee_name": employee.name,
+        "recipient_name": "客户联系人",
+        "recipient_phone": "13800000000",
+        "delivery_address": "客户地址",
+        "assigned_at": now,
+        "signer_name": None,
+        "signed_at": None,
+        "order_id": order_id,
+        "order_no": "ORD-ASGI-001",
+        "customer_id": customer_id,
+        "customer_name": "客户甲",
+        "total_amount": Decimal("100.00"),
+        "product_quantity": 2,
+        "has_exception": False,
+    }
+    group = {
+        "delivery_employee_id": employee.id,
+        "delivery_employee_name": employee.name,
+        "order_count": 1,
+        "customer_count": 1,
+        "product_quantity": 2,
+        "total_amount": Decimal("100.00"),
+        "exception_order_count": 0,
+        "deliveries": [delivery],
+    }
+    return group, delivery
+
+
+def _delivery_detail_response_payload(employee, now):
+    _, current = _delivery_current_response_payload(employee, now)
+    return {
+        **current,
+        "order_status": "stocked_out",
+        "assigned_by_id": employee.id,
+        "assigned_by_name": employee.name,
+        "proof_image_urls": [],
+        "sign_remark": None,
+        "signed_by_id": None,
+        "signed_by_name": None,
+        "created_at": now,
+        "updated_at": now,
+        "events": [],
+        "items": [],
+    }
+
+
+def test_delivery_asgi_static_routes_and_response_serialization(monkeypatch):
+    from app.api.v1 import order_delivery as delivery_api
+
+    employee = _delivery_employee(name="配送员")
+    now = datetime(2026, 7, 19, 10, 30)
+    current_group, _ = _delivery_current_response_payload(employee, now)
+    detail = _delivery_detail_response_payload(employee, now)
+    received = {}
+
+    async def options(db):
+        return [{"id": employee.id, "name": employee.name}]
+
+    async def current(db, current_user, **filters):
+        received["current"] = (current_user, filters)
+        return [current_group]
+
+    async def archive(db, current_user, **filters):
+        received["archive"] = (current_user, filters)
+        return {"items": [], "total": 0, "page": 1, "page_size": 20}
+
+    async def get_detail(db, delivery_id, current_user):
+        received["detail"] = (delivery_id, current_user)
+        return detail
+
+    monkeypatch.setattr(delivery_api.order_delivery_service, "list_active_employee_options", options)
+    monkeypatch.setattr(delivery_api.order_delivery_service, "list_current_deliveries", current)
+    monkeypatch.setattr(delivery_api.order_delivery_service, "list_delivery_archive", archive)
+    monkeypatch.setattr(delivery_api.order_delivery_service, "get_delivery_detail", get_detail)
+    client = _delivery_api_test_client(employee)
+
+    try:
+        options_response = client.get("/api/v1/deliveries/employee-options")
+        current_response = client.get("/api/v1/deliveries/current")
+        archive_response = client.get(
+            "/api/v1/deliveries/archive",
+            params={"signed_from": "2026-07-19", "signed_to": "2026-07-19"},
+        )
+        detail_response = client.get(
+            f"/api/v1/deliveries/{detail['id']}"
+        )
+    finally:
+        client.close()
+        app.dependency_overrides.clear()
+
+    assert options_response.status_code == 200
+    assert options_response.json()["data"] == [
+        {"id": str(employee.id), "name": employee.name}
+    ]
+    assert current_response.status_code == 200
+    assert current_response.json()["data"][0]["delivery_employee_id"] == str(
+        employee.id
+    )
+    assert current_response.json()["data"][0]["deliveries"][0]["assigned_at"] == (
+        "2026-07-19 18:30:00"
+    )
+    assert archive_response.status_code == 200
+    assert received["archive"][1]["signed_from"] == date(2026, 7, 19)
+    assert received["archive"][1]["signed_to"] == date(2026, 7, 19)
+    assert detail_response.status_code == 200
+    assert detail_response.json()["data"]["id"] == str(detail["id"])
+    assert isinstance(received["detail"][0], uuid.UUID)
+    assert received["current"][0] is employee
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "body", "as_admin"),
+    [
+        ("get", "/api/v1/deliveries/not-a-uuid", None, False),
+        ("get", "/api/v1/deliveries/current?employee_id=not-a-uuid", None, False),
+        ("get", "/api/v1/deliveries/archive?employee_id=not-a-uuid", None, False),
+        (
+            "put",
+            "/api/v1/orders/not-a-uuid/stock-out",
+            {
+                "delivery_employee_id": str(uuid.uuid4()),
+                "recipient_name": "收货人",
+                "recipient_phone": "13800000000",
+                "delivery_address": "客户地址",
+            },
+            False,
+        ),
+        (
+            "put",
+            f"/api/v1/orders/{uuid.uuid4()}/stock-out",
+            {
+                "delivery_employee_id": "not-a-uuid",
+                "recipient_name": "收货人",
+                "recipient_phone": "13800000000",
+                "delivery_address": "客户地址",
+            },
+            False,
+        ),
+        (
+            "put",
+            f"/api/v1/deliveries/{uuid.uuid4()}/reassign",
+            {"delivery_employee_id": "not-a-uuid"},
+            True,
+        ),
+    ],
+)
+def test_delivery_asgi_rejects_malformed_uuid_boundaries(
+    monkeypatch, method, path, body, as_admin
+):
+    from app.api.v1 import order as order_api
+    from app.api.v1 import order_delivery as delivery_api
+
+    user = _delivery_employee(
+        role=EmployeeRole.admin if as_admin else EmployeeRole.normal
+    )
+
+    async def unexpected(*args, **kwargs):
+        raise AssertionError("service must not receive malformed UUID")
+
+    monkeypatch.setattr(order_api, "transition_order", unexpected)
+    monkeypatch.setattr(delivery_api.order_delivery_service, "get_delivery_detail", unexpected)
+    monkeypatch.setattr(delivery_api.order_delivery_service, "list_current_deliveries", unexpected)
+    monkeypatch.setattr(delivery_api.order_delivery_service, "list_delivery_archive", unexpected)
+    monkeypatch.setattr(delivery_api.order_delivery_service, "reassign_delivery", unexpected)
+    client = _delivery_api_test_client(user)
+
+    try:
+        if body is None:
+            response = getattr(client, method)(path)
+        else:
+            response = getattr(client, method)(path, json=body)
+    finally:
+        client.close()
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 422
+    assert response.json()["code"] == 422
+    assert response.json()["message"] == "请求参数校验失败"
+    assert response.json()["data"]
+
+
+def test_delivery_asgi_reassign_requires_admin(monkeypatch):
+    from app.api.v1 import order_delivery as delivery_api
+
+    normal_user = _delivery_employee(role=EmployeeRole.normal)
+
+    async def unexpected(*args, **kwargs):
+        raise AssertionError("normal user must not reach reassignment service")
+
+    monkeypatch.setattr(delivery_api.order_delivery_service, "reassign_delivery", unexpected)
+    client = _delivery_api_test_client(normal_user)
+
+    try:
+        response = client.put(
+            f"/api/v1/deliveries/{uuid.uuid4()}/reassign",
+            json={"delivery_employee_id": str(uuid.uuid4())},
+        )
+    finally:
+        client.close()
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 403
+    assert response.json() == {
+        "code": 403,
+        "message": "Admin access required",
+        "data": None,
+    }
+
+
+@pytest.mark.parametrize(
+    ("method", "suffix", "body", "service_name", "role"),
+    [
+        (
+            "PUT",
+            "sign",
+            {
+                "signer_name": "王老板",
+                "proof_image_urls": ["proof.png"],
+                "remark": "货物完好",
+            },
+            "sign_delivery",
+            EmployeeRole.normal,
+        ),
+        (
+            "POST",
+            "exceptions",
+            {"exception_type": "customer_absent", "remark": "客户不在"},
+            "record_delivery_exception",
+            EmployeeRole.normal,
+        ),
+        (
+            "PUT",
+            "reassign",
+            {
+                "delivery_employee_id": str(uuid.uuid4()),
+                "reason": "临时调整",
+            },
+            "reassign_delivery",
+            EmployeeRole.admin,
+        ),
+    ],
+)
+def test_delivery_asgi_mutations_parse_body_and_serialize_response(
+    monkeypatch, method, suffix, body, service_name, role
+):
+    from app.api.v1 import order_delivery as delivery_api
+
+    user = _delivery_employee(role=role, name="操作员")
+    now = datetime(2026, 7, 19, 10, 30)
+    detail = _delivery_detail_response_payload(user, now)
+    delivery_id = detail["id"]
+    received = {}
+
+    async def mutate(db, received_delivery_id, request, current_user):
+        received["mutation"] = (
+            received_delivery_id,
+            request,
+            current_user,
+        )
+
+    async def get_detail(db, received_delivery_id, current_user):
+        received["detail"] = (received_delivery_id, current_user)
+        return detail
+
+    monkeypatch.setattr(
+        delivery_api.order_delivery_service, service_name, mutate
+    )
+    monkeypatch.setattr(
+        delivery_api.order_delivery_service, "get_delivery_detail", get_detail
+    )
+    client = _delivery_api_test_client(user)
+
+    try:
+        response = client.request(
+            method,
+            f"/api/v1/deliveries/{delivery_id}/{suffix}",
+            json=body,
+        )
+    finally:
+        client.close()
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["data"]["id"] == str(delivery_id)
+    assert response.json()["data"]["assigned_at"] == "2026-07-19 18:30:00"
+    assert received["mutation"][0] == delivery_id
+    assert received["mutation"][2] is user
+    assert received["detail"] == (delivery_id, user)
+    if suffix == "sign":
+        assert received["mutation"][1].signer_name == "王老板"
+    elif suffix == "exceptions":
+        assert received["mutation"][1].exception_type.value == "customer_absent"
+    else:
+        assert isinstance(received["mutation"][1].delivery_employee_id, uuid.UUID)
+
+
+def test_delivery_asgi_archive_rejects_inverted_date_range():
+    admin = _delivery_employee(role=EmployeeRole.admin, name="管理员")
+    client = _delivery_api_test_client(admin)
+
+    try:
+        response = client.get(
+            "/api/v1/deliveries/archive",
+            params={"signed_from": "2026-07-20", "signed_to": "2026-07-19"},
+        )
+    finally:
+        client.close()
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "code": 400,
+        "message": "签收开始日期不能晚于结束日期",
+        "data": None,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("handler_name", "service_name", "error", "expected_status"),
+    [
+        ("delivery_detail", "get_delivery_detail", ValueError("配送记录不存在"), 404),
+        ("delivery_detail", "get_delivery_detail", PermissionError("无权查看该配送记录"), 403),
+        ("sign_delivery", "sign_delivery", ValueError("配送记录状态无效"), 400),
+    ],
+)
+async def test_delivery_api_maps_service_errors(
+    monkeypatch, handler_name, service_name, error, expected_status
+):
+    from app.api.v1 import order_delivery as delivery_api
+    from app.schemas.order_delivery import OrderDeliverySignRequest
+
+    employee = Employee(
+        id=uuid.uuid4(),
+        username="delivery-user",
+        name="配送员",
+        password_hash="hash",
+        role=EmployeeRole.normal,
+        status=EmployeeStatus.active,
+    )
+
+    async def fail(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(delivery_api.order_delivery_service, service_name, fail)
+    handler = getattr(delivery_api, handler_name)
+
+    with pytest.raises(HTTPException) as caught:
+        if handler_name == "sign_delivery":
+            await handler(
+                str(uuid.uuid4()),
+                OrderDeliverySignRequest(signer_name="签收人"),
+                employee,
+                object(),
+            )
+        else:
+            await handler(str(uuid.uuid4()), employee, object())
+
+    assert caught.value.status_code == expected_status
+    assert caught.value.detail == str(error)
 
 
 @pytest.mark.asyncio
@@ -1113,6 +2494,60 @@ async def test_complete_order_updates_customer_statistics_without_adjusting_leve
     assert customer.last_order_at == created_at
     assert customer.level_id == original_level_id
     assert not any(isinstance(item, LevelChangeLog) for item in db.added)
+
+
+def test_order_complete_request_requires_valid_actual_payment():
+    request = OrderCompleteRequest(
+        paid_amount="20000.00",
+        payment_proof_image_urls=["https://example.com/payment.jpg"],
+    )
+
+    assert request.paid_amount == Decimal("20000.00")
+    assert request.payment_proof_image_urls == ["https://example.com/payment.jpg"]
+
+    with pytest.raises(ValidationError):
+        OrderCompleteRequest(paid_amount="0", payment_proof_image_urls=["proof.jpg"])
+    with pytest.raises(ValidationError):
+        OrderCompleteRequest(paid_amount="10", payment_proof_image_urls=[])
+
+
+@pytest.mark.asyncio
+async def test_complete_order_uses_paid_amount_for_customer_statistics():
+    customer = Customer(
+        id=uuid.uuid4(),
+        name="客户",
+        contact_name="联系人",
+        contact_phone="13800000000",
+        level_id=uuid.uuid4(),
+    )
+    customer.total_spent = Decimal("100.00")
+    customer.order_count = 1
+    order = Order(
+        id=uuid.uuid4(),
+        order_no="ORD1",
+        customer_id=customer.id,
+        total_amount=Decimal("20010.00"),
+        status=OrderStatus.delivered_unpaid,
+        created_at=datetime(2026, 7, 20, 9, 0),
+    )
+    db = QueueDb([FakeResult(one=order), FakeResult(one=customer)])
+
+    await order_service.transition_order(
+        db,
+        str(order.id),
+        OrderStatus.completed,
+        "cashier-user",
+        complete_request=OrderCompleteRequest(
+            paid_amount="20000.00",
+            payment_proof_image_urls=["https://example.com/payment.jpg"],
+        ),
+    )
+
+    assert order.status == OrderStatus.completed
+    assert order.paid_amount == Decimal("20000.00")
+    assert order.payment_proof_image_urls == ["https://example.com/payment.jpg"]
+    assert customer.total_spent == Decimal("20100.00")
+    assert customer.order_count == 2
 
 
 def test_order_output_contains_page_contract():
@@ -1575,7 +3010,9 @@ async def test_start_shipping_records_operator_and_keeps_inventory_reserved(monk
 
 
 @pytest.mark.asyncio
-async def test_stock_out_delivery_and_payment_record_each_operator(monkeypatch):
+async def test_stock_out_and_delivery_record_each_operator(monkeypatch):
+    from app.services import order_delivery_service
+
     order = Order(
         id=uuid.uuid4(),
         order_no="ORD1",
@@ -1585,28 +3022,529 @@ async def test_stock_out_delivery_and_payment_record_each_operator(monkeypatch):
     )
     db = QueueDb([FakeResult(one=order), FakeResult(one=order), FakeResult(one=order), FakeResult(one=None)])
     deducted = []
+    created_deliveries = []
+    operator = _delivery_employee(name="仓库操作员")
+    stock_out_request = OrderStockOutRequest(
+        delivery_employee_id=str(uuid.uuid4()),
+        recipient_name="客户联系人",
+        recipient_phone="13800000000",
+        delivery_address="客户地址",
+    )
 
     async def deduct_inventory(_db, current_order):
         deducted.append(current_order)
+
+    async def create_delivery(_db, current_order, request, operator):
+        created_deliveries.append((_db, current_order, request, operator))
 
     async def skip_complete(*_args):
         return None
 
     monkeypatch.setattr(order_service, "_deduct_reserved_inventory", deduct_inventory, raising=False)
+    monkeypatch.setattr(
+        order_delivery_service,
+        "create_order_delivery",
+        create_delivery,
+    )
     monkeypatch.setattr(order_service, "_complete", skip_complete)
 
-    await order_service.transition_order(db, str(order.id), OrderStatus.stocked_out, "warehouse-user")
+    await order_service.transition_order(
+        db,
+        str(order.id),
+        OrderStatus.stocked_out,
+        operator,
+        stock_out_request=stock_out_request,
+    )
     assert deducted == [order]
-    assert order.stock_out_by == "warehouse-user"
+    assert created_deliveries == [
+        (db, order, stock_out_request, operator)
+    ]
+    assert order.stock_out_by == operator.username
     assert order.stock_out_at is not None
 
     await order_service.transition_order(db, str(order.id), OrderStatus.delivered_unpaid, "delivery-user")
     assert order.delivered_by == "delivery-user"
     assert order.delivered_at is not None
 
-    await order_service.transition_order(db, str(order.id), OrderStatus.completed, "cashier-user")
+    await order_service.transition_order(
+        db,
+        str(order.id),
+        OrderStatus.completed,
+        "cashier-user",
+        complete_request=OrderCompleteRequest(
+            paid_amount="10.00",
+            payment_proof_image_urls=["https://example.com/payment.jpg"],
+        ),
+    )
     assert order.paid_by == "cashier-user"
     assert order.paid_at is not None
+
+
+@pytest.mark.asyncio
+async def test_stock_out_and_delivery_are_atomic_in_one_session_without_service_commit():
+    from app.models.order import OrderStatusLog
+    from app.models.order_delivery import (
+        OrderDelivery,
+        OrderDeliveryEvent,
+        OrderDeliveryEventType,
+        OrderDeliveryStatus,
+    )
+
+    class CommitTrackingDb(QueueDb):
+        def __init__(self, results):
+            super().__init__(results)
+            self.commit_calls = 0
+
+        async def commit(self):
+            self.commit_calls += 1
+
+    operator = _delivery_employee(name="仓库操作员")
+    delivery_employee = _delivery_employee(name="配送员")
+    order = _delivery_order(status=OrderStatus.shipping, total_amount=Decimal("50.00"))
+    item = OrderItem(
+        id=uuid.uuid4(),
+        order_id=order.id,
+        product_id=uuid.uuid4(),
+        barcode="商品-001",
+        product_name="测试商品",
+        quantity=5,
+        unit_price=Decimal("10.00"),
+        subtotal=Decimal("50.00"),
+    )
+    warehouse_id = uuid.uuid4()
+    allocation = OrderInventoryAllocation(
+        id=uuid.uuid4(),
+        order_id=order.id,
+        order_item_id=item.id,
+        product_id=item.product_id,
+        warehouse_id=warehouse_id,
+        quantity=5,
+        status=OrderInventoryAllocationStatus.reserved,
+    )
+    inventory = Inventory(
+        id=uuid.uuid4(),
+        product_id=item.product_id,
+        warehouse_id=warehouse_id,
+        quantity=8,
+        locked=5,
+    )
+    db = CommitTrackingDb(
+        [
+            FakeResult(one=order),
+            FakeResult(values=[item]),
+            FakeResult(values=[allocation]),
+            FakeResult(values=[inventory]),
+            FakeResult(scalar=0),
+            FakeResult(one=delivery_employee),
+        ]
+    )
+    request = OrderStockOutRequest(
+        delivery_employee_id=str(delivery_employee.id),
+        recipient_name="客户联系人",
+        recipient_phone="13800000000",
+        delivery_address="客户地址",
+    )
+
+    await order_service.transition_order(
+        db,
+        str(order.id),
+        OrderStatus.stocked_out,
+        operator,
+        stock_out_request=request,
+    )
+
+    delivery = next(added for added in db.added if isinstance(added, OrderDelivery))
+    assigned_event = next(
+        added for added in db.added if isinstance(added, OrderDeliveryEvent)
+    )
+    assert (inventory.quantity, inventory.locked) == (3, 0)
+    assert allocation.status == OrderInventoryAllocationStatus.shipped
+    assert order.status == OrderStatus.stocked_out
+    assert order.stock_out_by == operator.username
+    assert order.stock_out_at is not None
+    assert delivery.status == OrderDeliveryStatus.delivering
+    assert delivery.delivery_employee_id == delivery_employee.id
+    assert delivery.assigned_by_id == operator.id
+    assert assigned_event.event_type == OrderDeliveryEventType.assigned
+    assert assigned_event.delivery_id == delivery.id
+    assert any(isinstance(added, OrderStatusLog) for added in db.added)
+    assert db.commit_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_stock_out_and_delivery_require_request_and_employee_actor(monkeypatch):
+    order = _delivery_order(status=OrderStatus.shipping)
+    operator = _delivery_employee(name="仓库操作员")
+    request = OrderStockOutRequest(
+        delivery_employee_id=str(uuid.uuid4()),
+        recipient_name="客户联系人",
+        recipient_phone="13800000000",
+        delivery_address="客户地址",
+    )
+    deducted = []
+
+    async def deduct_inventory(_db, current_order):
+        deducted.append(current_order)
+
+    monkeypatch.setattr(order_service, "_deduct_reserved_inventory", deduct_inventory)
+
+    with pytest.raises(ValueError, match="配送信息不能为空"):
+        await order_service.transition_order(
+            QueueDb([FakeResult(one=order)]),
+            str(order.id),
+            OrderStatus.stocked_out,
+            operator,
+        )
+
+    order.status = OrderStatus.shipping
+    with pytest.raises(ValueError, match="出库操作员工不能为空"):
+        await order_service.transition_order(
+            QueueDb([FakeResult(one=order)]),
+            str(order.id),
+            OrderStatus.stocked_out,
+            operator.username,
+            stock_out_request=request,
+        )
+
+    assert deducted == []
+
+
+@pytest.mark.asyncio
+async def test_stock_out_and_delivery_failure_propagates_without_service_commit(monkeypatch):
+    from app.services import order_delivery_service
+
+    class CommitTrackingDb(QueueDb):
+        def __init__(self, results):
+            super().__init__(results)
+            self.commit_calls = 0
+
+        async def commit(self):
+            self.commit_calls += 1
+
+    operator = _delivery_employee(name="仓库操作员")
+    order = _delivery_order(status=OrderStatus.shipping, total_amount=Decimal("20.00"))
+    item = OrderItem(
+        id=uuid.uuid4(),
+        order_id=order.id,
+        product_id=uuid.uuid4(),
+        barcode="商品-001",
+        product_name="测试商品",
+        quantity=2,
+        unit_price=Decimal("10.00"),
+        subtotal=Decimal("20.00"),
+    )
+    warehouse_id = uuid.uuid4()
+    allocation = OrderInventoryAllocation(
+        id=uuid.uuid4(),
+        order_id=order.id,
+        order_item_id=item.id,
+        product_id=item.product_id,
+        warehouse_id=warehouse_id,
+        quantity=2,
+        status=OrderInventoryAllocationStatus.reserved,
+    )
+    inventory = Inventory(
+        id=uuid.uuid4(),
+        product_id=item.product_id,
+        warehouse_id=warehouse_id,
+        quantity=5,
+        locked=2,
+    )
+    db = CommitTrackingDb(
+        [
+            FakeResult(one=order),
+            FakeResult(values=[item]),
+            FakeResult(values=[allocation]),
+            FakeResult(values=[inventory]),
+            FakeResult(scalar=0),
+        ]
+    )
+    request = OrderStockOutRequest(
+        delivery_employee_id=str(uuid.uuid4()),
+        recipient_name="客户联系人",
+        recipient_phone="13800000000",
+        delivery_address="客户地址",
+    )
+
+    async def fail_delivery_creation(*_args):
+        raise ValueError("配送创建失败")
+
+    monkeypatch.setattr(
+        order_delivery_service,
+        "create_order_delivery",
+        fail_delivery_creation,
+    )
+
+    with pytest.raises(ValueError, match="配送创建失败"):
+        await order_service.transition_order(
+            db,
+            str(order.id),
+            OrderStatus.stocked_out,
+            operator,
+            stock_out_request=request,
+        )
+
+    assert (inventory.quantity, inventory.locked) == (3, 0)
+    assert allocation.status == OrderInventoryAllocationStatus.shipped
+    assert order.status == OrderStatus.shipping
+    assert db.commit_calls == 0
+    assert not any(
+        added.__class__.__name__ == "OrderStatusLog" for added in db.added
+    )
+
+
+@pytest.mark.asyncio
+async def test_stock_out_and_delivery_summary_serializes_final_signature_fields():
+    from app.models.order_delivery import OrderDeliveryStatus
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    order = Order(
+        id=uuid.uuid4(),
+        order_no="ORD1",
+        customer_id=uuid.uuid4(),
+        total_amount=Decimal("20.00"),
+        status=OrderStatus.delivered_unpaid,
+        created_at=now,
+        updated_at=now,
+    )
+    employee = _delivery_employee(name="配送员")
+    delivery = _delivery_record(order, employee, status=OrderDeliveryStatus.signed)
+    delivery.signer_name = "实际签收人"
+    delivery.proof_image_urls = None
+    delivery.sign_remark = "已当面交付"
+    delivery.signed_at = now
+    delivery.signed_by_id = employee.id
+    delivery.signed_by_name = employee.name
+    db = QueueDb(
+        [
+            FakeResult(values=[]),
+            FakeResult(values=[]),
+            FakeResult(one="测试客户"),
+            FakeResult(values=[]),
+            FakeResult(one=delivery),
+            FakeResult(values=[]),
+        ]
+    )
+
+    result = await order_service._out(db, order)
+
+    assert result.delivery is not None
+    assert result.delivery.delivery_employee_id == str(employee.id)
+    assert result.delivery.delivery_employee_name == employee.name
+    assert result.delivery.recipient_name == delivery.recipient_name
+    assert result.delivery.recipient_phone == delivery.recipient_phone
+    assert result.delivery.delivery_address == delivery.delivery_address
+    assert result.delivery.status == OrderDeliveryStatus.signed
+    assert result.delivery.signer_name == "实际签收人"
+    assert result.delivery.proof_image_urls == []
+    assert result.delivery.sign_remark == "已当面交付"
+    assert result.delivery.signed_at == now
+    assert result.delivery.signed_by_id == str(employee.id)
+    assert result.delivery.signed_by_name == employee.name
+    assert result.delivery.latest_exception is None
+    assert sum("FROM order_deliveries" in sql for sql in db.statements) == 1
+    assert sum("FROM order_delivery_events" in sql for sql in db.statements) == 1
+
+
+@pytest.mark.asyncio
+async def test_order_delivery_summary_uses_latest_exception_event_for_detail():
+    from app.models.order_delivery import (
+        OrderDeliveryEvent,
+        OrderDeliveryEventType,
+        OrderDeliveryExceptionType,
+    )
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    order = _delivery_order()
+    order.created_at = now
+    order.updated_at = now
+    employee = _delivery_employee()
+    delivery = _delivery_record(order, employee)
+    latest_exception = OrderDeliveryEvent(
+        id=uuid.uuid4(),
+        delivery_id=delivery.id,
+        event_type=OrderDeliveryEventType.exception,
+        exception_type=OrderDeliveryExceptionType.customer_refused,
+        remark="客户拒收",
+        operator_id=employee.id,
+        operator_name=employee.name,
+        created_at=now.replace(microsecond=now.microsecond + 1),
+    )
+    db = QueueDb(
+        [
+            FakeResult(values=[]),
+            FakeResult(values=[]),
+            FakeResult(one="测试客户"),
+            FakeResult(values=[]),
+            FakeResult(one=delivery),
+            FakeResult(values=[latest_exception]),
+        ]
+    )
+
+    result = await order_service._out(db, order)
+
+    assert result.delivery is not None
+    assert result.delivery.latest_exception is not None
+    assert result.delivery.latest_exception.exception_type == OrderDeliveryExceptionType.customer_refused
+    assert result.delivery.latest_exception.remark == "客户拒收"
+    assert result.delivery.latest_exception.occurred_at == latest_exception.created_at
+    exception_statement = next(
+        sql for sql in db.statements if "FROM order_delivery_events" in sql
+    )
+    assert "order_delivery_events.created_at DESC" in exception_statement
+    assert "order_delivery_events.id DESC" in exception_statement
+
+
+@pytest.mark.asyncio
+async def test_stock_out_and_delivery_actor_identity_cannot_diverge(monkeypatch):
+    from app.models.order import OrderStatusLog
+    from app.services import order_delivery_service
+
+    operator = _delivery_employee(name="仓库操作员姓名")
+    order = _delivery_order(status=OrderStatus.shipping)
+    request = OrderStockOutRequest(
+        delivery_employee_id=str(uuid.uuid4()),
+        recipient_name="客户联系人",
+        recipient_phone="13800000000",
+        delivery_address="客户地址",
+    )
+    delivery_actors = []
+
+    async def deduct_inventory(*_args):
+        return None
+
+    async def create_delivery(_db, current_order, stock_out_request, actor):
+        delivery_actors.append((current_order, stock_out_request, actor))
+
+    monkeypatch.setattr(order_service, "_deduct_reserved_inventory", deduct_inventory)
+    monkeypatch.setattr(
+        order_delivery_service,
+        "create_order_delivery",
+        create_delivery,
+    )
+    db = QueueDb([FakeResult(one=order)])
+
+    await order_service.transition_order(
+        db,
+        str(order.id),
+        OrderStatus.stocked_out,
+        operator,
+        stock_out_request=request,
+    )
+
+    status_log = next(added for added in db.added if isinstance(added, OrderStatusLog))
+    assert delivery_actors == [(order, request, operator)]
+    assert order.stock_out_by == operator.username
+    assert status_log.operator == operator.username
+
+
+@pytest.mark.asyncio
+async def test_list_orders_batch_loads_delivery_summaries_once():
+    from app.models.order_delivery import (
+        OrderDeliveryEvent,
+        OrderDeliveryEventType,
+        OrderDeliveryExceptionType,
+        OrderDeliveryStatus,
+    )
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    orders = [
+        Order(
+            id=uuid.uuid4(),
+            order_no=f"ORD-{index}",
+            customer_id=uuid.uuid4(),
+            total_amount=Decimal("20.00"),
+            status=OrderStatus.stocked_out,
+            created_at=now,
+            updated_at=now,
+        )
+        for index in range(2)
+    ]
+    employees = [_delivery_employee(name=f"配送员{index}") for index in range(2)]
+    deliveries = [
+        _delivery_record(order, employee, status=OrderDeliveryStatus.delivering)
+        for order, employee in zip(orders, employees, strict=True)
+    ]
+    latest_exception = OrderDeliveryEvent(
+        id=uuid.uuid4(),
+        delivery_id=deliveries[0].id,
+        event_type=OrderDeliveryEventType.exception,
+        exception_type=OrderDeliveryExceptionType.invalid_contact,
+        remark="电话无效",
+        operator_id=employees[0].id,
+        operator_name=employees[0].name,
+        created_at=now,
+    )
+
+    class ListOrdersDb(QueueDb):
+        async def execute(self, statement):
+            sql = str(statement)
+            self.statements.append(sql)
+            self.statement_params.append(statement.compile().params)
+            if "count(*)" in sql and "FROM orders" in sql:
+                return FakeResult(scalar=2)
+            if "FROM orders" in sql:
+                return FakeResult(values=orders)
+            if "FROM order_deliveries" in sql:
+                if " IN " in sql:
+                    return FakeResult(values=deliveries)
+                order_id = next(iter(statement.compile().params.values()))
+                delivery = next(
+                    item for item in deliveries if str(item.order_id) == str(order_id)
+                )
+                return FakeResult(one=delivery)
+            if "FROM order_delivery_events" in sql:
+                return FakeResult(values=[latest_exception])
+            if "FROM order_items" in sql:
+                return FakeResult(values=[])
+            if "FROM order_inventory_allocations" in sql:
+                return FakeResult(values=[])
+            if "FROM customers" in sql:
+                return FakeResult(one="测试客户")
+            if "FROM order_status_logs" in sql:
+                return FakeResult(values=[])
+            raise AssertionError(f"Unexpected query: {sql}")
+
+    db = ListOrdersDb()
+
+    result = await order_service.list_orders(db, page=1, page_size=20)
+
+    assert [item.delivery.id for item in result.items] == [
+        str(delivery.id) for delivery in deliveries
+    ]
+    assert result.items[0].delivery.latest_exception is not None
+    assert result.items[0].delivery.latest_exception.exception_type == OrderDeliveryExceptionType.invalid_contact
+    assert result.items[1].delivery.latest_exception is None
+    delivery_statements = [
+        sql for sql in db.statements if "FROM order_deliveries" in sql
+    ]
+    assert len(delivery_statements) == 1
+    assert " IN " in delivery_statements[0]
+    exception_statements = [
+        sql for sql in db.statements if "FROM order_delivery_events" in sql
+    ]
+    assert len(exception_statements) == 1
+    assert " IN " in exception_statements[0]
+    normalized_exception_sql = " ".join(exception_statements[0].split()).lower()
+    assert "row_number() over (partition by order_delivery_events.delivery_id" in normalized_exception_sql
+    assert "order_delivery_events.created_at desc" in normalized_exception_sql
+    assert "order_delivery_events.id desc" in normalized_exception_sql
+    assert "setdefault" not in inspect.getsource(order_service._latest_delivery_exceptions)
+
+
+def test_order_delivery_order_summary_has_distinct_schema_name():
+    from app.schemas.order import OrderDeliveryOrderSummaryOut
+
+    assert "OrderDeliveryOrderSummaryOut" in str(
+        OrderOut.model_fields["delivery"].annotation
+    )
+    assert {
+        "proof_image_urls",
+        "sign_remark",
+        "signed_by_id",
+        "signed_by_name",
+        "latest_exception",
+    }.issubset(OrderDeliveryOrderSummaryOut.model_fields)
 
 
 @pytest.mark.asyncio
@@ -2143,6 +4081,8 @@ async def test_order_output_does_not_lazy_load_relationships():
         delivered_by = None
         paid_at = None
         paid_by = None
+        paid_amount = None
+        payment_proof_image_urls = None
         cancelled_at = None
         cancelled_by = None
         cancel_reason = None
@@ -2159,6 +4099,7 @@ async def test_order_output_does_not_lazy_load_relationships():
         FakeResult(values=[]),
         FakeResult(one="测试客户"),
         FakeResult(values=[]),
+        FakeResult(one=None),
     ])
 
     result = await order_service._out(db, RelationshipGuardOrder())
@@ -2166,6 +4107,7 @@ async def test_order_output_does_not_lazy_load_relationships():
     assert result.order_no == "ORD1"
     assert result.customer_name == "测试客户"
     assert result.items == []
+    assert result.delivery is None
 
 
 @pytest.mark.asyncio
@@ -2225,3 +4167,798 @@ def test_order_shipping_options_route_is_available():
         if route.path.startswith("/api/v1/orders/")
     }
     assert ("/api/v1/orders/{order_id}/shipping-options", ("GET",)) in routes
+
+
+def _delivery_employee(*, role=EmployeeRole.normal, status=EmployeeStatus.active, name="配送员"):
+    return Employee(
+        id=uuid.uuid4(),
+        username=f"employee-{uuid.uuid4().hex[:8]}",
+        password_hash="hashed",
+        name=name,
+        role=role,
+        status=status,
+    )
+
+
+def _delivery_order(*, status=OrderStatus.stocked_out, total_amount=Decimal("100.00")):
+    return Order(
+        id=uuid.uuid4(),
+        order_no=f"ORD-{uuid.uuid4().hex[:8]}",
+        customer_id=uuid.uuid4(),
+        total_amount=total_amount,
+        status=status,
+    )
+
+
+def _delivery_record(order, employee, *, status=None):
+    from app.models.order_delivery import OrderDelivery, OrderDeliveryStatus
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    return OrderDelivery(
+        id=uuid.uuid4(),
+        order_id=order.id,
+        delivery_employee_id=employee.id,
+        delivery_employee_name=employee.name,
+        status=status or OrderDeliveryStatus.delivering,
+        recipient_name="客户联系人",
+        recipient_phone="13800000000",
+        delivery_address="客户地址",
+        assigned_at=now,
+        assigned_by_id=employee.id,
+        assigned_by_name=employee.name,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+@pytest.mark.asyncio
+async def test_delivery_service_creates_assignment_snapshot_and_event():
+    from app.models.order_delivery import OrderDeliveryEvent, OrderDeliveryEventType, OrderDeliveryStatus
+    from app.schemas.order import OrderStockOutRequest
+    from app.services import order_delivery_service
+
+    operator = _delivery_employee(role=EmployeeRole.admin, name="管理员")
+    delivery_employee = _delivery_employee(name="张配送")
+    order = _delivery_order()
+    request = OrderStockOutRequest(
+        delivery_employee_id=str(delivery_employee.id),
+        recipient_name="李四",
+        recipient_phone="13900000000",
+        delivery_address="临时收货地址",
+    )
+    db = QueueDb([FakeResult(one=delivery_employee)])
+
+    delivery = await order_delivery_service.create_order_delivery(
+        db, order, request, operator
+    )
+
+    assert delivery.order_id == order.id
+    assert delivery.status == OrderDeliveryStatus.delivering
+    assert delivery.delivery_employee_id == delivery_employee.id
+    assert delivery.delivery_employee_name == "张配送"
+    assert delivery.assigned_by_id == operator.id
+    assert delivery.assigned_by_name == "管理员"
+    assert delivery.recipient_name == "李四"
+    assert delivery.recipient_phone == "13900000000"
+    assert delivery.delivery_address == "临时收货地址"
+    assert delivery.assigned_at.tzinfo is None
+    event = next(item for item in db.added if isinstance(item, OrderDeliveryEvent))
+    assert event.event_type == OrderDeliveryEventType.assigned
+    assert event.to_employee_id == delivery_employee.id
+    assert event.to_employee_name == "张配送"
+    assert event.operator_id == operator.id
+    assert event.operator_name == "管理员"
+    assert db.flushed is True
+
+
+@pytest.mark.asyncio
+async def test_delivery_active_employee_lookup_locks_selected_row():
+    from app.services import order_delivery_service
+
+    employee = _delivery_employee()
+    db = QueueDb([FakeResult(one=employee)])
+
+    assert await order_delivery_service._active_employee(db, employee.id) is employee
+    assert "FOR UPDATE" in db.statements[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("selected_employee", [None, _delivery_employee(status=EmployeeStatus.disabled)])
+async def test_delivery_service_rejects_missing_or_disabled_employee(selected_employee):
+    from app.schemas.order import OrderStockOutRequest
+    from app.services import order_delivery_service
+
+    operator = _delivery_employee(role=EmployeeRole.admin)
+    order = _delivery_order()
+    selected_id = selected_employee.id if selected_employee else uuid.uuid4()
+    request = OrderStockOutRequest(
+        delivery_employee_id=str(selected_id),
+        recipient_name="李四",
+        recipient_phone="13900000000",
+        delivery_address="客户地址",
+    )
+
+    with pytest.raises(ValueError, match="配送员不存在或已禁用"):
+        await order_delivery_service.create_order_delivery(
+            QueueDb([FakeResult(one=selected_employee)]), order, request, operator
+        )
+
+
+@pytest.mark.asyncio
+async def test_delivery_permission_and_reassignment_rules():
+    from app.models.order_delivery import OrderDeliveryEvent, OrderDeliveryEventType
+    from app.schemas.order_delivery import OrderDeliveryReassignRequest
+    from app.services import order_delivery_service
+
+    owner = _delivery_employee(name="原配送员")
+    other = _delivery_employee(name="其他员工")
+    admin = _delivery_employee(role=EmployeeRole.admin, name="管理员")
+    target = _delivery_employee(name="新配送员")
+    order = _delivery_order()
+    delivery = _delivery_record(order, owner)
+
+    with pytest.raises(PermissionError, match="管理员"):
+        await order_delivery_service.reassign_delivery(
+            QueueDb([]),
+            str(delivery.id),
+            OrderDeliveryReassignRequest(delivery_employee_id=str(target.id)),
+            other,
+        )
+
+    db = QueueDb([FakeResult(one=(delivery, order)), FakeResult(one=target)])
+    result = await order_delivery_service.reassign_delivery(
+        db,
+        str(delivery.id),
+        OrderDeliveryReassignRequest(
+            delivery_employee_id=str(target.id), reason="临时调整"
+        ),
+        admin,
+    )
+
+    assert result.delivery_employee_id == target.id
+    assert result.delivery_employee_name == "新配送员"
+    event = next(item for item in db.added if isinstance(item, OrderDeliveryEvent))
+    assert event.event_type == OrderDeliveryEventType.reassigned
+    assert event.from_employee_id == owner.id
+    assert event.from_employee_name == "原配送员"
+    assert event.to_employee_id == target.id
+    assert event.to_employee_name == "新配送员"
+    assert event.remark == "临时调整"
+
+    same_target_delivery = _delivery_record(order, target)
+    same_target_db = QueueDb(
+        [FakeResult(one=(same_target_delivery, order)), FakeResult(one=target)]
+    )
+    with pytest.raises(ValueError, match="不能与当前配送员相同"):
+        await order_delivery_service.reassign_delivery(
+            same_target_db,
+            str(same_target_delivery.id),
+            OrderDeliveryReassignRequest(delivery_employee_id=str(target.id)),
+            admin,
+        )
+
+
+@pytest.mark.asyncio
+async def test_delivery_service_locked_row_query_uses_one_or_none():
+    from app.models.order_delivery import OrderDeliveryExceptionType
+    from app.schemas.order_delivery import OrderDeliveryExceptionRequest
+    from app.services import order_delivery_service
+
+    owner = _delivery_employee(name="配送员")
+    order = _delivery_order()
+    delivery = _delivery_record(order, owner)
+    db = QueueDb([StrictRowResult(one=(delivery, order))])
+
+    result = await order_delivery_service.record_delivery_exception(
+        db,
+        str(delivery.id),
+        OrderDeliveryExceptionRequest(
+            exception_type=OrderDeliveryExceptionType.customer_absent,
+            remark="客户暂时不在",
+        ),
+        owner,
+    )
+
+    assert result is delivery
+
+
+@pytest.mark.asyncio
+async def test_delivery_permission_allows_owner_or_admin_to_record_repeated_exceptions():
+    from app.models.order_delivery import OrderDeliveryEvent, OrderDeliveryEventType, OrderDeliveryExceptionType
+    from app.schemas.order_delivery import OrderDeliveryExceptionRequest
+    from app.services import order_delivery_service
+
+    owner = _delivery_employee(name="配送员")
+    other = _delivery_employee(name="无关员工")
+    admin = _delivery_employee(role=EmployeeRole.admin, name="管理员")
+    order = _delivery_order()
+    delivery = _delivery_record(order, owner)
+    request = OrderDeliveryExceptionRequest(
+        exception_type=OrderDeliveryExceptionType.customer_absent,
+        remark="客户暂时不在",
+    )
+
+    with pytest.raises(PermissionError, match="无权处理"):
+        await order_delivery_service.record_delivery_exception(
+            QueueDb([FakeResult(one=(delivery, order))]),
+            str(delivery.id),
+            request,
+            other,
+        )
+
+    db = QueueDb(
+        [FakeResult(one=(delivery, order)), FakeResult(one=(delivery, order))]
+    )
+    await order_delivery_service.record_delivery_exception(
+        db, str(delivery.id), request, owner
+    )
+    await order_delivery_service.record_delivery_exception(
+        db, str(delivery.id), request, admin
+    )
+
+    events = [item for item in db.added if isinstance(item, OrderDeliveryEvent)]
+    assert [event.event_type for event in events] == [
+        OrderDeliveryEventType.exception,
+        OrderDeliveryEventType.exception,
+    ]
+    assert [event.operator_name for event in events] == ["配送员", "管理员"]
+    assert all(event.exception_type == OrderDeliveryExceptionType.customer_absent for event in events)
+
+
+@pytest.mark.asyncio
+async def test_delivery_service_signs_once_and_advances_order():
+    from app.models.order_delivery import OrderDeliveryEvent, OrderDeliveryEventType, OrderDeliveryStatus
+    from app.schemas.order_delivery import OrderDeliverySignRequest
+    from app.services import order_delivery_service
+
+    owner = _delivery_employee(name="配送员")
+    order = _delivery_order()
+    delivery = _delivery_record(order, owner)
+    db = QueueDb([FakeResult(one=(delivery, order)), FakeResult(one=order)])
+
+    result = await order_delivery_service.sign_delivery(
+        db,
+        str(delivery.id),
+        OrderDeliverySignRequest(
+            signer_name="王老板",
+            proof_image_urls=["https://example.com/proof.jpg"],
+            remark="货物完好",
+        ),
+        owner,
+    )
+
+    assert result.status == OrderDeliveryStatus.signed
+    assert result.signer_name == "王老板"
+    assert result.proof_image_urls == ["https://example.com/proof.jpg"]
+    assert result.sign_remark == "货物完好"
+    assert result.signed_by_id == owner.id
+    assert result.signed_by_name == "配送员"
+    assert result.signed_at.tzinfo is None
+    assert order.status == OrderStatus.delivered_unpaid
+    assert order.delivered_by == owner.username
+    delivered_log = next(
+        item
+        for item in db.added
+        if item.__class__.__name__ == "OrderStatusLog"
+    )
+    assert delivered_log.operator == owner.username
+    signed_events = [
+        item
+        for item in db.added
+        if isinstance(item, OrderDeliveryEvent)
+        and item.event_type == OrderDeliveryEventType.signed
+    ]
+    assert len(signed_events) == 1
+    assert signed_events[0].remark == "货物完好"
+
+    with pytest.raises(ValueError, match="配送记录状态无效"):
+        await order_delivery_service.sign_delivery(
+            QueueDb([FakeResult(one=(delivery, order))]),
+            str(delivery.id),
+            OrderDeliverySignRequest(signer_name="重复签收"),
+            owner,
+        )
+
+
+@pytest.mark.asyncio
+async def test_delivery_sign_can_collect_payment_and_complete_order():
+    from app.models.order_delivery import OrderDeliveryStatus
+    from app.schemas.order_delivery import OrderDeliverySignRequest
+    from app.services import order_delivery_service
+
+    owner = _delivery_employee(name="配送员")
+    order = _delivery_order(total_amount=Decimal("20010.00"))
+    delivery = _delivery_record(order, owner)
+    customer = Customer(
+        id=order.customer_id,
+        name="客户",
+        contact_name="联系人",
+        contact_phone="13800000000",
+        level_id=uuid.uuid4(),
+    )
+    customer.total_spent = Decimal("100.00")
+    customer.order_count = 1
+    db = QueueDb([
+        FakeResult(one=(delivery, order)),
+        FakeResult(one=order),
+        FakeResult(one=order),
+        FakeResult(one=customer),
+    ])
+
+    result = await order_delivery_service.sign_delivery(
+        db,
+        str(delivery.id),
+        OrderDeliverySignRequest(
+            signer_name="王老板",
+            proof_image_urls=["https://example.com/sign.jpg"],
+            remark="货物完好并已收款",
+            collect_payment=True,
+            paid_amount="20000.00",
+            payment_proof_image_urls=["https://example.com/payment.jpg"],
+        ),
+        owner,
+    )
+
+    assert result.status == OrderDeliveryStatus.signed
+    assert order.status == OrderStatus.completed
+    assert order.paid_amount == Decimal("20000.00")
+    assert order.payment_proof_image_urls == ["https://example.com/payment.jpg"]
+    assert order.paid_by == owner.username
+    assert customer.total_spent == Decimal("20100.00")
+    assert [item.to_status for item in db.added if isinstance(item, OrderStatusLog)] == [
+        OrderStatus.delivered_unpaid,
+        OrderStatus.completed,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_current_delivery_group_aggregates_exact_metrics_and_rows():
+    from app.services import order_delivery_service
+
+    admin = _delivery_employee(role=EmployeeRole.admin)
+    employee = _delivery_employee(name="配送员甲")
+    first_delivery_id = uuid.uuid4()
+    second_delivery_id = uuid.uuid4()
+    first_order_id = uuid.uuid4()
+    second_order_id = uuid.uuid4()
+    first_customer_id = uuid.uuid4()
+    second_customer_id = uuid.uuid4()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    db = QueueDb(
+        [
+            FakeResult(
+                mappings=[
+                    {
+                        "delivery_employee_id": employee.id,
+                        "delivery_employee_name": employee.name,
+                        "order_count": 2,
+                        "customer_count": 2,
+                        "product_quantity": 7,
+                        "total_amount": Decimal("180.00"),
+                        "exception_order_count": 1,
+                    }
+                ]
+            ),
+            FakeResult(
+                mappings=[
+                    {
+                        "id": first_delivery_id,
+                        "status": "delivering",
+                        "delivery_employee_id": employee.id,
+                        "delivery_employee_name": employee.name,
+                        "recipient_name": "客户甲联系人",
+                        "recipient_phone": "13800000001",
+                        "delivery_address": "地址甲",
+                        "assigned_at": now,
+                        "signer_name": None,
+                        "signed_at": None,
+                        "order_id": first_order_id,
+                        "order_no": "ORD-001",
+                        "customer_id": first_customer_id,
+                        "customer_name": "客户甲",
+                        "total_amount": Decimal("100.00"),
+                        "product_quantity": 3,
+                        "has_exception": True,
+                        "latest_exception_type": "customer_absent",
+                        "latest_exception_remark": "客户临时外出",
+                        "latest_exception_occurred_at": now,
+                    },
+                    {
+                        "id": second_delivery_id,
+                        "status": "delivering",
+                        "delivery_employee_id": employee.id,
+                        "delivery_employee_name": employee.name,
+                        "recipient_name": "客户乙联系人",
+                        "recipient_phone": "13800000002",
+                        "delivery_address": "地址乙",
+                        "assigned_at": now,
+                        "signer_name": None,
+                        "signed_at": None,
+                        "order_id": second_order_id,
+                        "order_no": "ORD-002",
+                        "customer_id": second_customer_id,
+                        "customer_name": "客户乙",
+                        "total_amount": Decimal("80.00"),
+                        "product_quantity": 4,
+                        "has_exception": False,
+                    },
+                ]
+            ),
+        ]
+    )
+
+    groups = await order_delivery_service.list_current_deliveries(
+        db, admin, order_keyword="ORD", customer_keyword="客户", has_exception=None
+    )
+
+    assert len(groups) == 1
+    group = groups[0]
+    assert group.order_count == 2
+    assert group.customer_count == 2
+    assert group.product_quantity == 7
+    assert Decimal(str(group.total_amount)) == Decimal("180.00")
+    assert group.exception_order_count == 1
+    assert [item.order_no for item in group.deliveries] == ["ORD-001", "ORD-002"]
+    assert [item.has_exception for item in group.deliveries] == [True, False]
+    assert group.deliveries[0].latest_exception.exception_type.value == "customer_absent"
+    assert group.deliveries[0].latest_exception.remark == "客户临时外出"
+    assert group.deliveries[0].latest_exception.occurred_at == now
+    assert group.deliveries[1].latest_exception is None
+    assert len({item.id for item in group.deliveries}) == 2
+    assert "count(distinct" in db.statements[0].lower()
+    aggregate_sql = db.statements[0].lower()
+    group_by_sql = aggregate_sql.rsplit("group by", 1)[1].split("order by", 1)[0]
+    assert "order_deliveries.delivery_employee_id" in group_by_sql
+    assert "row_number() over" in db.statements[1].lower()
+    assert "order_deliveries.delivery_employee_name" not in group_by_sql
+    assert "employees" in aggregate_sql
+
+
+@pytest.mark.asyncio
+async def test_current_delivery_group_scopes_normal_employee():
+    from app.services import order_delivery_service
+
+    employee = _delivery_employee()
+    requested_employee_id = uuid.uuid4()
+    db = QueueDb([FakeResult(mappings=[]), FakeResult(mappings=[])])
+
+    await order_delivery_service.list_current_deliveries(
+        db, employee, employee_id=str(requested_employee_id)
+    )
+
+    assert all(employee.id in params.values() for params in db.statement_params)
+    assert all(requested_employee_id not in params.values() for params in db.statement_params)
+
+
+@pytest.mark.asyncio
+async def test_delivery_archive_filters_and_role_scope():
+    from app.services import order_delivery_service
+
+    employee = _delivery_employee(name="配送员")
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    delivery_id = uuid.uuid4()
+    order_id = uuid.uuid4()
+    customer_id = uuid.uuid4()
+    db = QueueDb(
+        [
+            FakeResult(scalar=1),
+            FakeResult(
+                mappings=[
+                    {
+                        "id": delivery_id,
+                        "status": "signed",
+                        "delivery_employee_id": employee.id,
+                        "delivery_employee_name": employee.name,
+                        "recipient_name": "联系人",
+                        "recipient_phone": "13800000000",
+                        "delivery_address": "客户地址",
+                        "assigned_at": now,
+                        "signer_name": "签收人",
+                        "signed_at": now,
+                        "order_id": order_id,
+                        "order_no": "ORD-ARCHIVE-001",
+                        "customer_id": customer_id,
+                        "customer_name": "客户甲",
+                        "total_amount": Decimal("100.00"),
+                        "product_quantity": 2,
+                        "proof_image_urls": None,
+                        "sign_remark": "已签收",
+                    }
+                ]
+            ),
+        ]
+    )
+
+    page = await order_delivery_service.list_delivery_archive(
+        db,
+        employee,
+        page=2,
+        page_size=10,
+        employee_id=str(uuid.uuid4()),
+        order_keyword="ARCHIVE",
+        customer_keyword="客户",
+        signer_keyword="签收",
+        signed_from=now,
+        signed_to=now,
+    )
+
+    assert page.total == 1
+    assert page.page == 2
+    assert page.page_size == 10
+    assert page.items[0].proof_image_urls == []
+    assert all(employee.id in params.values() for params in db.statement_params)
+    assert all("order_deliveries.status" in statement for statement in db.statements)
+    assert "OFFSET" in db.statements[1] and "LIMIT" in db.statements[1]
+
+
+@pytest.mark.asyncio
+async def test_delivery_archive_date_filters_use_inclusive_end_day_boundary():
+    from app.services import order_delivery_service
+
+    admin = _delivery_employee(role=EmployeeRole.admin, name="管理员")
+    db = QueueDb([FakeResult(scalar=0), FakeResult(mappings=[])])
+
+    await order_delivery_service.list_delivery_archive(
+        db,
+        admin,
+        signed_from=date(2026, 7, 19),
+        signed_to=date(2026, 7, 19),
+    )
+
+    start_of_day_utc = datetime(2026, 7, 18, 16)
+    next_day_utc = datetime(2026, 7, 19, 16)
+    for statement, params in zip(db.statements, db.statement_params):
+        assert "order_deliveries.signed_at >=" in statement
+        assert "order_deliveries.signed_at <" in statement
+        assert "order_deliveries.signed_at <=" not in statement
+        assert start_of_day_utc in params.values()
+        assert next_day_utc in params.values()
+
+
+@pytest.mark.asyncio
+async def test_delivery_archive_service_rejects_inverted_date_range():
+    from app.services import order_delivery_service
+
+    admin = _delivery_employee(role=EmployeeRole.admin, name="管理员")
+
+    with pytest.raises(ValueError, match="签收开始日期不能晚于结束日期"):
+        await order_delivery_service.list_delivery_archive(
+            QueueDb(),
+            admin,
+            signed_from=date(2026, 7, 20),
+            signed_to=date(2026, 7, 19),
+        )
+
+
+@pytest.mark.asyncio
+async def test_delivery_service_detail_uses_unique_mapping_lookup():
+    from app.services import order_delivery_service
+
+    owner = _delivery_employee(name="配送员")
+    order = _delivery_order()
+    delivery = _delivery_record(order, owner)
+    detail_row = {
+        **{
+            column.name: getattr(delivery, column.name)
+            for column in delivery.__table__.columns
+        },
+        "order_no": order.order_no,
+        "customer_id": order.customer_id,
+        "customer_name": "客户甲",
+        "total_amount": order.total_amount,
+        "order_status": order.status,
+        "product_quantity": 0,
+    }
+    db = QueueDb(
+        [
+            StrictUniqueMappingQueryResult(mappings=[detail_row]),
+            FakeResult(values=[]),
+            FakeResult(values=[]),
+        ]
+    )
+
+    result = await order_delivery_service.get_delivery_detail(
+        db, str(delivery.id), owner
+    )
+
+    assert result.id == str(delivery.id)
+
+
+@pytest.mark.asyncio
+async def test_delivery_service_detail_scopes_owner_and_orders_events():
+    from app.models.order_delivery import OrderDeliveryEvent, OrderDeliveryEventType
+    from app.services import order_delivery_service
+
+    owner = _delivery_employee(name="配送员")
+    other = _delivery_employee(name="其他员工")
+    order = _delivery_order()
+    delivery = _delivery_record(order, owner)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    assigned = OrderDeliveryEvent(
+        id=uuid.uuid4(),
+        delivery_id=delivery.id,
+        event_type=OrderDeliveryEventType.assigned,
+        to_employee_id=owner.id,
+        to_employee_name=owner.name,
+        operator_id=owner.id,
+        operator_name=owner.name,
+        created_at=now,
+    )
+    exception = OrderDeliveryEvent(
+        id=uuid.uuid4(),
+        delivery_id=delivery.id,
+        event_type=OrderDeliveryEventType.exception,
+        exception_type="customer_absent",
+        operator_id=owner.id,
+        operator_name=owner.name,
+        created_at=now,
+    )
+    item = OrderItem(
+        id=uuid.uuid4(),
+        order_id=order.id,
+        product_id=uuid.uuid4(),
+        product_name="测试商品",
+        barcode="6900000000001",
+        quantity=3,
+        unit_price=Decimal("10.00"),
+        subtotal=Decimal("30.00"),
+    )
+    detail_row = {
+        **{column.name: getattr(delivery, column.name) for column in delivery.__table__.columns},
+        "order_no": order.order_no,
+        "customer_id": order.customer_id,
+        "customer_name": "客户甲",
+        "total_amount": order.total_amount,
+        "order_status": order.status,
+        "product_quantity": 3,
+    }
+
+    with pytest.raises(PermissionError, match="无权查看"):
+        await order_delivery_service.get_delivery_detail(
+            QueueDb(
+                [
+                    FakeResult(mappings=[detail_row]),
+                    FakeResult(scalar=None),
+                ]
+            ),
+            str(delivery.id),
+            other,
+        )
+
+    db = QueueDb(
+        [
+            FakeResult(mappings=[detail_row]),
+            FakeResult(values=[assigned, exception]),
+            FakeResult(values=[item]),
+        ]
+    )
+    result = await order_delivery_service.get_delivery_detail(
+        db, str(delivery.id), owner
+    )
+
+    assert [event.event_type for event in result.events] == [
+        OrderDeliveryEventType.assigned,
+        OrderDeliveryEventType.exception,
+    ]
+    assert "order_delivery_events.created_at" in db.statements[1]
+    assert "order_delivery_events.id" in db.statements[1]
+    assert len(result.items) == 1
+    assert result.items[0].product_id == str(item.product_id)
+    assert result.items[0].product_name == "测试商品"
+    assert result.items[0].barcode == "6900000000001"
+    assert result.items[0].quantity == 3
+
+
+@pytest.mark.asyncio
+async def test_delivery_permission_allows_signed_historical_assignee_detail():
+    from app.models.order_delivery import (
+        OrderDeliveryEvent,
+        OrderDeliveryEventType,
+        OrderDeliveryStatus,
+    )
+    from app.services import order_delivery_service
+
+    prior_assignee = _delivery_employee(name="原配送员")
+    final_assignee = _delivery_employee(name="最终配送员")
+    unrelated = _delivery_employee(name="无关员工")
+    order = _delivery_order(status=OrderStatus.delivered_unpaid)
+    delivery = _delivery_record(
+        order, final_assignee, status=OrderDeliveryStatus.signed
+    )
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    assigned = OrderDeliveryEvent(
+        id=uuid.uuid4(),
+        delivery_id=delivery.id,
+        event_type=OrderDeliveryEventType.assigned,
+        to_employee_id=prior_assignee.id,
+        to_employee_name=prior_assignee.name,
+        operator_id=final_assignee.id,
+        operator_name=final_assignee.name,
+        created_at=now,
+    )
+    reassigned = OrderDeliveryEvent(
+        id=uuid.uuid4(),
+        delivery_id=delivery.id,
+        event_type=OrderDeliveryEventType.reassigned,
+        from_employee_id=prior_assignee.id,
+        from_employee_name=prior_assignee.name,
+        to_employee_id=final_assignee.id,
+        to_employee_name=final_assignee.name,
+        operator_id=final_assignee.id,
+        operator_name=final_assignee.name,
+        created_at=now,
+    )
+    detail_row = {
+        **{
+            column.name: getattr(delivery, column.name)
+            for column in delivery.__table__.columns
+        },
+        "order_no": order.order_no,
+        "customer_id": order.customer_id,
+        "customer_name": "客户甲",
+        "total_amount": order.total_amount,
+        "order_status": order.status,
+        "product_quantity": 0,
+    }
+
+    allowed_db = QueueDb(
+        [
+            FakeResult(mappings=[detail_row]),
+            FakeResult(one=assigned.id),
+            FakeResult(values=[assigned, reassigned]),
+            FakeResult(values=[]),
+        ]
+    )
+    result = await order_delivery_service.get_delivery_detail(
+        allowed_db, str(delivery.id), prior_assignee
+    )
+    assert result.delivery_employee_id == str(final_assignee.id)
+
+    with pytest.raises(PermissionError, match="无权查看"):
+        await order_delivery_service.get_delivery_detail(
+            QueueDb(
+                [
+                    FakeResult(mappings=[detail_row]),
+                    FakeResult(scalar=None),
+                ]
+            ),
+            str(delivery.id),
+            unrelated,
+        )
+
+
+def test_access_token_keeps_positional_expiry_compatibility():
+    from datetime import timedelta
+
+    from app.core.security import create_access_token, decode_token
+
+    token, _ = create_access_token("legacy-user", "normal", timedelta(minutes=1))
+    assert decode_token(token)["sub"] == "legacy-user"
+
+
+@pytest.mark.asyncio
+async def test_refresh_uses_current_employee_claims_for_legacy_refresh_token():
+    from app.core.security import create_refresh_token, decode_token
+    from app.services.auth_service import refresh_access_token
+    from app.schemas.auth import RefreshRequest
+
+    employee = _delivery_employee(role=EmployeeRole.admin, name="已升级员工")
+    refresh_token, _ = create_refresh_token(employee.username, "normal")
+
+    class RedisStub:
+        async def get(self, key):
+            return None
+
+        async def setex(self, key, ttl, value):
+            return None
+
+    response = await refresh_access_token(
+        QueueDb([FakeResult(one=employee)]),
+        RedisStub(),
+        RefreshRequest(refresh_token=refresh_token),
+    )
+    access_claims = decode_token(response.access_token)
+    refresh_claims = decode_token(response.refresh_token)
+    assert access_claims["role"] == "admin"
+    assert access_claims["employee_id"] == str(employee.id)
+    assert "employee_id" not in refresh_claims

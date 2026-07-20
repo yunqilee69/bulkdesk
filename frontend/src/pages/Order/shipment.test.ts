@@ -61,7 +61,7 @@ describe('order shipment allocations', () => {
       'stockOut',
       'cancel',
     ]);
-    expect(getAvailableOrderActions('stocked_out')).toEqual(['deliver']);
+    expect(getAvailableOrderActions('stocked_out')).toEqual([]);
     expect(getAvailableOrderActions('delivered_unpaid')).toEqual(['complete']);
     expect(getAvailableOrderActions('completed')).toEqual([]);
     expect(getAvailableOrderActions('cancelled')).toEqual([]);
