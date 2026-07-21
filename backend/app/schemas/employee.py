@@ -1,8 +1,8 @@
+import re
 from datetime import datetime
 from typing import Optional
 
 from pydantic import Field, field_validator
-import re
 
 from app.models.employee import EmployeeRole, EmployeeStatus
 from app.schemas.common import ApiSchema
@@ -18,24 +18,42 @@ def _validate_password(v: str) -> str:
     return v
 
 
+def _validate_unique_roles(values: list[EmployeeRole]) -> list[EmployeeRole]:
+    if len(values) != len(set(values)):
+        raise ValueError("员工角色不能重复")
+    return values
+
+
 class EmployeeCreate(ApiSchema):
     username: str = Field(..., min_length=1, max_length=50)
     password: str = Field(..., min_length=8)
     name: str = Field(..., min_length=1, max_length=100)
     phone: Optional[str] = None
-    role: EmployeeRole = EmployeeRole.normal
+    roles: list[EmployeeRole] = Field(..., min_length=1)
 
     @field_validator("password")
     @classmethod
     def validate_password(cls, v: str) -> str:
         return _validate_password(v)
 
+    @field_validator("roles")
+    @classmethod
+    def unique_roles(cls, values: list[EmployeeRole]) -> list[EmployeeRole]:
+        return _validate_unique_roles(values)
+
 
 class EmployeeUpdate(ApiSchema):
     name: Optional[str] = Field(None, max_length=100)
     phone: Optional[str] = None
-    role: Optional[EmployeeRole] = None
+    roles: Optional[list[EmployeeRole]] = Field(None, min_length=1)
     status: Optional[EmployeeStatus] = None
+
+    @field_validator("roles")
+    @classmethod
+    def unique_roles(cls, values: Optional[list[EmployeeRole]]) -> Optional[list[EmployeeRole]]:
+        if values is None:
+            return None
+        return _validate_unique_roles(values)
 
 
 class PasswordChange(ApiSchema):
@@ -62,7 +80,7 @@ class EmployeeOut(ApiSchema):
     username: str
     name: str
     phone: Optional[str]
-    role: EmployeeRole
+    roles: list[EmployeeRole] = Field(..., min_length=1)
     status: EmployeeStatus
     last_login_at: Optional[datetime]
     created_at: datetime
@@ -74,3 +92,8 @@ class EmployeeOut(ApiSchema):
     @classmethod
     def uuid_to_str(cls, v):
         return str(v)
+
+    @field_validator("roles")
+    @classmethod
+    def unique_roles(cls, values: list[EmployeeRole]) -> list[EmployeeRole]:
+        return _validate_unique_roles(values)

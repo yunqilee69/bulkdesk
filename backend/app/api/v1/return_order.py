@@ -2,7 +2,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.deps import CurrentUser
+from app.core.deps import AdminUser, CurrentUser, DeliveryUser
+from app.core.permissions import has_any_role
+from app.models.employee import EmployeeRole
 from app.models.return_order import ReturnOrderStatus
 from app.schemas.common import PaginatedResponse, ResponseBase
 from app.schemas.return_order import ReturnOrderCreate, ReturnOrderOut, ReturnOrderVoidRequest
@@ -19,12 +21,20 @@ router = APIRouter(prefix="/return-orders", tags=["ReturnOrder"])
 @router.post("", response_model=ResponseBase[ReturnOrderOut], status_code=status.HTTP_201_CREATED)
 async def create(
     req: ReturnOrderCreate,
-    current_user: CurrentUser = None,
+    current_user: DeliveryUser,
     db: AsyncSession = Depends(get_db),
 ):
     try:
-        return_order = await create_return_order(db, req, current_user.username)
+        return_order = await create_return_order(
+            db,
+            req,
+            current_user.id,
+            current_user.name,
+            is_admin=has_any_role(current_user, EmployeeRole.admin),
+        )
         return ResponseBase(data=await get_return_order(db, str(return_order.id)))
+    except PermissionError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
@@ -61,7 +71,7 @@ async def get(
 async def void(
     return_order_id: str,
     req: ReturnOrderVoidRequest,
-    current_user: CurrentUser = None,
+    current_user: AdminUser,
     db: AsyncSession = Depends(get_db),
 ):
     try:

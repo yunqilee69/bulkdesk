@@ -42,7 +42,13 @@ import {
   type OrderDeliveryEmployeeOption,
   type OrderDeliveryExceptionType,
 } from '@/services/delivery';
+import { listAllWarehouses } from '@/services/inventory';
 import { uploadFile } from '@/services/upload';
+import {
+  createReturnOrder,
+  listReturnableOrderItems,
+  type ReturnableOrderItem,
+} from '@/services/returnOrder';
 
 import {
   canHandleDelivery,
@@ -54,7 +60,7 @@ import {
   serializeArchiveFilters,
 } from './delivery';
 
-type ActiveModal = 'sign' | 'exception' | 'reassign' | undefined;
+type ActiveModal = 'sign' | 'exception' | 'reassign' | 'return' | undefined;
 
 interface SignFormValues {
   signer_name: string;
@@ -106,6 +112,10 @@ const DeliveryPage = () => {
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detail, setDetail] = useState<OrderDeliveryDetail>();
+  const [returnableItems, setReturnableItems] = useState<ReturnableOrderItem[]>([]);
+  const [returnDrafts, setReturnDrafts] = useState<Record<string, { quantity?: number; reason?: string; condition?: 'normal' | 'expired' | 'damaged' | 'other'; shouldStockIn?: boolean; warehouseId?: string }>>({});
+  const [returnLoading, setReturnLoading] = useState(false);
+  const [returnWarehouseOptions, setReturnWarehouseOptions] = useState<Array<{ id: string; name: string }>>([]);
   const archiveVisited = useRef(false);
   const currentRequestId = useRef(0);
   const currentInitialized = useRef(false);
@@ -212,6 +222,7 @@ const DeliveryPage = () => {
           return (
             <Space size="small">
               {canHandle && <Button type="link" onClick={() => openActionModal('sign', record)}>登记签收</Button>}
+              {canHandle && <Button type="link" onClick={() => void openReturnModal(record)}>现场退货</Button>}
               {canHandle && <Button type="link" onClick={() => openActionModal('exception', record)}>登记异常</Button>}
               {canReassign && <Button type="link" onClick={() => openActionModal('reassign', record)}>改派</Button>}
             </Space>
@@ -262,6 +273,67 @@ const DeliveryPage = () => {
       signForm.setFieldsValue({ collect_payment: false, paid_amount: delivery.total_amount });
     }
     if (modal === 'reassign') void loadEmployees();
+  }
+
+  async function openReturnModal(delivery: OrderDeliveryCurrentRecord) {
+    setSelectedDelivery(delivery);
+    setReturnLoading(true);
+    setReturnDrafts({});
+    try {
+      const [response, warehouses] = await Promise.all([listReturnableOrderItems(delivery.id), listAllWarehouses()]);
+      if (response.code !== 0) {
+        message.error(getMessage(response, '加载可退商品失败'));
+        return;
+      }
+      setReturnableItems(response.data ?? []);
+      setReturnWarehouseOptions(warehouses.filter((warehouse) => warehouse.status === 'active'));
+      setActiveModal('return');
+    } catch {
+      message.error('加载可退商品失败，请稍后重试');
+    } finally {
+      setReturnLoading(false);
+    }
+  }
+
+  async function submitReturn() {
+    if (!selectedDelivery) return;
+    const items = returnableItems.flatMap((item) => {
+      const draft = returnDrafts[item.source_order_item_id];
+      if (!draft?.quantity) return [];
+      if (!draft.reason?.trim()) {
+        message.error(`请填写 ${item.product_name} 的退货原因`);
+        return [];
+      }
+      if (draft.shouldStockIn && !draft.warehouseId) {
+        message.error(`请选择 ${item.product_name} 的入库仓库`);
+        return [];
+      }
+      return [{
+        source_order_item_id: item.source_order_item_id,
+        quantity: draft.quantity,
+        condition: draft.condition ?? 'normal',
+        return_reason: draft.reason.trim(),
+        should_stock_in: Boolean(draft.shouldStockIn),
+        warehouse_id: draft.shouldStockIn ? draft.warehouseId : undefined,
+      }];
+    });
+    if (!items.length) {
+      message.error('请至少填写一项退货数量和原因');
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const response = await createReturnOrder({ handling_delivery_id: selectedDelivery.id, items });
+      if (response.code !== 0) {
+        message.error(getMessage(response, '创建退货单失败'));
+        return;
+      }
+      message.success('退货单已创建');
+      closeActionModal(true);
+      await loadCurrent();
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   async function openDetail(id: string) {
@@ -526,6 +598,22 @@ const DeliveryPage = () => {
           <Form.Item name="delivery_employee_id" label="新配送员" rules={[{ required: true, message: '请选择新配送员' }]}><Select aria-label="新配送员" loading={employeesLoading} options={employeeOptions.filter((employee) => employee.id !== selectedDelivery?.delivery_employee_id).map((employee) => ({ label: employee.name, value: employee.id }))} /></Form.Item>
           <Form.Item name="reason" label="改派原因"><Input.TextArea aria-label="改派原因" rows={3} /></Form.Item>
         </Form>
+      </Modal>
+
+      <Modal title="现场退货" open={activeModal === 'return'} onCancel={() => closeActionModal()} onOk={() => void submitReturn()} okText="创建退货单" confirmLoading={submitting} width={920} destroyOnHidden>
+        <Alert type="info" showIcon title="可选择该客户的历史已出库/待收款/已完成订单商品；商品和价格由来源订单自动带入。" style={{ marginBottom: 16 }} />
+        <Table rowKey="source_order_item_id" loading={returnLoading} pagination={false} size="small" dataSource={returnableItems} columns={[
+          { title: '来源订单', dataIndex: 'order_no' },
+          { title: '商品', dataIndex: 'product_name' },
+          { title: '条码', dataIndex: 'barcode' },
+          { title: '单价', dataIndex: 'unit_price', render: (value) => formatAmount(value) },
+          { title: '可退', dataIndex: 'returnable_quantity' },
+          { title: '退货数量', render: (_, item) => <InputNumber min={0} max={item.returnable_quantity} precision={0} value={returnDrafts[item.source_order_item_id]?.quantity} onChange={(quantity) => setReturnDrafts((drafts) => ({ ...drafts, [item.source_order_item_id]: { ...drafts[item.source_order_item_id], quantity: quantity ?? undefined } }))} /> },
+          { title: '状况', render: (_, item) => <Select style={{ width: 96 }} disabled={!returnDrafts[item.source_order_item_id]?.quantity} value={returnDrafts[item.source_order_item_id]?.condition ?? 'normal'} options={[{ label: '正常', value: 'normal' }, { label: '过期', value: 'expired' }, { label: '损坏', value: 'damaged' }, { label: '其他', value: 'other' }]} onChange={(condition) => setReturnDrafts((drafts) => ({ ...drafts, [item.source_order_item_id]: { ...drafts[item.source_order_item_id], condition } }))} /> },
+          { title: '退货原因', render: (_, item) => <Input value={returnDrafts[item.source_order_item_id]?.reason} disabled={!returnDrafts[item.source_order_item_id]?.quantity} onChange={(event) => setReturnDrafts((drafts) => ({ ...drafts, [item.source_order_item_id]: { ...drafts[item.source_order_item_id], reason: event.target.value } }))} /> },
+          { title: '入库', render: (_, item) => <Checkbox disabled={!returnDrafts[item.source_order_item_id]?.quantity} checked={Boolean(returnDrafts[item.source_order_item_id]?.shouldStockIn)} onChange={(event) => setReturnDrafts((drafts) => ({ ...drafts, [item.source_order_item_id]: { ...drafts[item.source_order_item_id], shouldStockIn: event.target.checked, warehouseId: event.target.checked ? drafts[item.source_order_item_id]?.warehouseId : undefined } }))}>入库</Checkbox> },
+          { title: '入库仓库', render: (_, item) => <Select style={{ width: 120 }} disabled={!returnDrafts[item.source_order_item_id]?.shouldStockIn} value={returnDrafts[item.source_order_item_id]?.warehouseId} options={returnWarehouseOptions.map((warehouse) => ({ label: warehouse.name, value: warehouse.id }))} onChange={(warehouseId) => setReturnDrafts((drafts) => ({ ...drafts, [item.source_order_item_id]: { ...drafts[item.source_order_item_id], warehouseId } }))} /> },
+        ]} />
       </Modal>
 
       <Drawer title="配送明细" open={detailOpen} onClose={() => { detailRequestId.current += 1; setDetailOpen(false); setDetail(undefined); }} size="large" loading={detailLoading}>

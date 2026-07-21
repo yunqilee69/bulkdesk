@@ -9,10 +9,17 @@ from sqlalchemy.orm import selectinload
 
 from app.models.customer import Customer
 from app.models.inventory import InventoryMovement, InventoryMovementItem, MovementType, Warehouse, WarehouseStatus
-from app.models.product import Product, ProductStatus
+from app.models.employee import Employee
+from app.models.order import Order, OrderItem, OrderStatus
+from app.models.order_delivery import OrderDelivery, OrderDeliveryStatus
 from app.models.return_order import ReturnOrder, ReturnOrderItem, ReturnOrderStatus
 from app.schemas.common import PaginatedResponse
-from app.schemas.return_order import ReturnOrderCreate, ReturnOrderItemOut, ReturnOrderOut
+from app.schemas.return_order import (
+    ReturnOrderCreate,
+    ReturnOrderItemOut,
+    ReturnOrderOut,
+    ReturnableOrderItemOut,
+)
 from app.services.inventory_service import _get_or_create_inventory
 
 
@@ -40,26 +47,164 @@ async def _movement_no(db: AsyncSession, prefix: str) -> str:
     return f"{code}{count + 1:06d}{uuid.uuid4().hex[:6].upper()}"
 
 
+async def list_returnable_items(
+    db: AsyncSession,
+    handling_delivery_id: str,
+    operator_id: uuid.UUID,
+    *,
+    is_admin: bool = False,
+) -> list[ReturnableOrderItemOut]:
+    delivery_row = (
+        await db.execute(
+            select(OrderDelivery, Order)
+            .join(Order, Order.id == OrderDelivery.order_id)
+            .where(OrderDelivery.id == uuid.UUID(handling_delivery_id))
+        )
+    ).one_or_none()
+    if delivery_row is None:
+        raise ValueError("配送任务不存在")
+    delivery, handling_order = delivery_row
+    if delivery.status != OrderDeliveryStatus.delivering:
+        raise ValueError("配送任务不是配送中状态")
+    if not is_admin and delivery.delivery_employee_id != operator_id:
+        raise PermissionError("只能查看本人当前配送任务的可退商品")
+
+    rows = (
+        await db.execute(
+            select(OrderItem, Order)
+            .join(Order, Order.id == OrderItem.order_id)
+            .where(
+                Order.customer_id == handling_order.customer_id,
+                Order.status.in_(
+                    [
+                        OrderStatus.stocked_out,
+                        OrderStatus.delivered_unpaid,
+                        OrderStatus.completed,
+                    ]
+                ),
+            )
+            .order_by(Order.created_at.desc(), OrderItem.id)
+        )
+    ).all()
+    if not rows:
+        return []
+
+    source_item_ids = [item.id for item, _ in rows]
+    returned_quantities = dict(
+        (
+            await db.execute(
+                select(
+                    ReturnOrderItem.source_order_item_id,
+                    func.coalesce(func.sum(ReturnOrderItem.quantity), 0),
+                )
+                .join(ReturnOrder, ReturnOrder.id == ReturnOrderItem.return_order_id)
+                .where(
+                    ReturnOrderItem.source_order_item_id.in_(source_item_ids),
+                    ReturnOrder.status == ReturnOrderStatus.completed,
+                )
+                .group_by(ReturnOrderItem.source_order_item_id)
+            )
+        ).all()
+    )
+    return [
+        ReturnableOrderItemOut(
+            source_order_item_id=item.id,
+            order_id=order.id,
+            order_no=order.order_no,
+            product_id=item.product_id,
+            product_name=item.product_name,
+            barcode=item.barcode,
+            unit_price=item.unit_price,
+            sold_quantity=item.quantity,
+            returned_quantity=int(returned_quantities.get(item.id, 0)),
+            returnable_quantity=item.quantity - int(returned_quantities.get(item.id, 0)),
+        )
+        for item, order in rows
+        if item.quantity > int(returned_quantities.get(item.id, 0))
+    ]
+
+
 async def create_return_order(
-    db: AsyncSession, req: ReturnOrderCreate, operator: str
+    db: AsyncSession,
+    req: ReturnOrderCreate,
+    operator_id: uuid.UUID,
+    operator_name: str,
+    *,
+    is_admin: bool = False,
 ) -> ReturnOrder:
+    delivery_row = (
+        await db.execute(
+            select(OrderDelivery, Order)
+            .join(Order, Order.id == OrderDelivery.order_id)
+            .where(OrderDelivery.id == uuid.UUID(req.handling_delivery_id))
+            .with_for_update()
+        )
+    ).one_or_none()
+    if delivery_row is None:
+        raise ValueError("配送任务不存在")
+    delivery, handling_order = delivery_row
+    if delivery.status != OrderDeliveryStatus.delivering:
+        raise ValueError("配送任务不是配送中状态")
+    if not is_admin and delivery.delivery_employee_id != operator_id:
+        raise PermissionError("只能从本人当前配送任务发起退货")
+
     customer = (
         await db.execute(
-            select(Customer).where(Customer.id == req.customer_id).with_for_update()
+            select(Customer)
+            .where(Customer.id == handling_order.customer_id)
+            .with_for_update()
         )
     ).scalar_one_or_none()
     if customer is None:
         raise ValueError("客户不存在")
 
-    product_ids = sorted({uuid.UUID(item.product_id) for item in req.items}, key=str)
-    products = (
-        await db.execute(select(Product).where(Product.id.in_(product_ids)))
-    ).scalars().all()
-    product_map = {str(product.id): product for product in products}
-    if len(product_map) != len(product_ids):
-        raise ValueError("退货商品不存在")
-    if any(product.status == ProductStatus.disabled for product in products):
-        raise ValueError("停售商品不能创建退货单")
+    source_item_ids = sorted(
+        {uuid.UUID(item.source_order_item_id) for item in req.items}, key=str
+    )
+    source_rows = (
+        await db.execute(
+            select(OrderItem, Order)
+            .join(Order, Order.id == OrderItem.order_id)
+            .where(
+                OrderItem.id.in_(source_item_ids),
+                Order.customer_id == customer.id,
+                Order.status.in_(
+                    [
+                        OrderStatus.stocked_out,
+                        OrderStatus.delivered_unpaid,
+                        OrderStatus.completed,
+                    ]
+                ),
+            )
+            .order_by(OrderItem.id)
+            .with_for_update()
+        )
+    ).all()
+    source_map = {str(source_item.id): (source_item, source_order) for source_item, source_order in source_rows}
+    if len(source_map) != len(source_item_ids):
+        raise ValueError("来源订单明细不存在、客户不一致或不可退")
+
+    completed_quantities = dict(
+        (
+            await db.execute(
+                select(
+                    ReturnOrderItem.source_order_item_id,
+                    func.coalesce(func.sum(ReturnOrderItem.quantity), 0),
+                )
+                .join(ReturnOrder, ReturnOrder.id == ReturnOrderItem.return_order_id)
+                .where(
+                    ReturnOrderItem.source_order_item_id.in_(source_item_ids),
+                    ReturnOrder.status == ReturnOrderStatus.completed,
+                )
+                .group_by(ReturnOrderItem.source_order_item_id)
+            )
+        ).all()
+    )
+    for requested_item in req.items:
+        source_item, _ = source_map[requested_item.source_order_item_id]
+        completed_quantity = int(completed_quantities.get(source_item.id, 0))
+        if completed_quantity + requested_item.quantity > source_item.quantity:
+            raise ValueError(f"商品 {source_item.product_name} 可退数量不足")
 
     warehouse_ids = sorted(
         {
@@ -86,26 +231,41 @@ async def create_return_order(
     inventories = {}
     stock_in_items = sorted(
         [item for item in req.items if item.should_stock_in],
-        key=lambda item: (item.product_id, item.warehouse_id or ""),
+        key=lambda item: (item.source_order_item_id, item.warehouse_id or ""),
     )
-    for item in stock_in_items:
-        inventories[(item.product_id, item.warehouse_id)] = await _get_or_create_inventory(
-            db, item.product_id, item.warehouse_id
+    for requested_item in stock_in_items:
+        source_item, _ = source_map[requested_item.source_order_item_id]
+        inventories[(requested_item.source_order_item_id, requested_item.warehouse_id)] = await _get_or_create_inventory(
+            db, source_item.product_id, uuid.UUID(requested_item.warehouse_id)
         )
 
     total_amount = sum(
-        (Decimal(str(item.unit_price)) * item.quantity for item in req.items),
+        (
+            Decimal(str(source_map[item.source_order_item_id][0].unit_price)) * item.quantity
+            for item in req.items
+        ),
         Decimal("0.00"),
     )
     customer_spent_before = Decimal(str(customer.total_spent))
-    customer_spent_after = max(Decimal("0.00"), customer_spent_before - total_amount)
+    completed_return_amount = sum(
+        (
+            Decimal(str(source_map[item.source_order_item_id][0].unit_price)) * item.quantity
+            for item in req.items
+            if source_map[item.source_order_item_id][1].status == OrderStatus.completed
+        ),
+        Decimal("0.00"),
+    )
+    customer_spent_after = max(
+        Decimal("0.00"), customer_spent_before - completed_return_amount
+    )
     completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
     return_order = ReturnOrder(
         return_no=await generate_return_no(db),
-        customer_id=uuid.UUID(req.customer_id),
+        customer_id=customer.id,
+        handling_delivery_id=delivery.id,
         total_amount=total_amount,
         status=ReturnOrderStatus.completed,
-        operator=operator,
+        operator=operator_name,
         completed_at=completed_at,
         remark=req.remark,
         customer_spent_before=customer_spent_before,
@@ -117,14 +277,15 @@ async def create_return_order(
 
     movement_rows = {}
     for requested_item in req.items:
-        product = product_map[requested_item.product_id]
-        unit_price = Decimal(str(requested_item.unit_price))
+        source_item, source_order = source_map[requested_item.source_order_item_id]
+        unit_price = Decimal(str(source_item.unit_price))
         subtotal = unit_price * requested_item.quantity
         return_item = ReturnOrderItem(
             return_order_id=return_order.id,
-            product_id=product.id,
-            product_name=product.name,
-            barcode=product.barcode,
+            source_order_item_id=source_item.id,
+            product_id=source_item.product_id,
+            product_name=source_item.product_name,
+            barcode=source_item.barcode,
             quantity=requested_item.quantity,
             unit_price=unit_price,
             subtotal=subtotal,
@@ -139,16 +300,17 @@ async def create_return_order(
             ),
         )
         db.add(return_item)
+        source_order.returned_amount = Decimal(str(source_order.returned_amount)) + subtotal
         if not requested_item.should_stock_in:
             continue
-        inventory = inventories[(requested_item.product_id, requested_item.warehouse_id)]
+        inventory = inventories[(requested_item.source_order_item_id, requested_item.warehouse_id)]
         before = inventory.quantity
         inventory.quantity += requested_item.quantity
         movement_rows.setdefault(return_item.warehouse_id, []).append(
             InventoryMovementItem(
-                product_id=product.id,
-                product_name=product.name,
-                barcode=product.barcode,
+                product_id=source_item.product_id,
+                product_name=source_item.product_name,
+                barcode=source_item.barcode,
                 quantity=requested_item.quantity,
                 before_quantity=before,
                 after_quantity=inventory.quantity,
@@ -199,6 +361,22 @@ async def void_return_order(
     if customer is None:
         raise ValueError("客户不存在")
 
+    source_item_ids = sorted(
+        {item.source_order_item_id for item in return_order.items}, key=str
+    )
+    source_rows = (
+        await db.execute(
+            select(OrderItem, Order)
+            .join(Order, Order.id == OrderItem.order_id)
+            .where(OrderItem.id.in_(source_item_ids))
+            .order_by(OrderItem.id)
+            .with_for_update()
+        )
+    ).all()
+    source_map = {item.id: (item, order) for item, order in source_rows}
+    if len(source_map) != len(source_item_ids):
+        raise ValueError("来源订单明细不存在")
+
     stock_in_items = sorted(
         [item for item in return_order.items if item.should_stock_in],
         key=lambda item: (str(item.product_id), str(item.warehouse_id)),
@@ -225,6 +403,14 @@ async def void_return_order(
                 after_quantity=inventory.quantity,
             )
         )
+
+    for item in return_order.items:
+        _, source_order = source_map[item.source_order_item_id]
+        source_order.returned_amount = Decimal(str(source_order.returned_amount)) - Decimal(
+            str(item.subtotal)
+        )
+        if source_order.returned_amount < 0:
+            raise ValueError("来源订单退货金额异常")
 
     for warehouse_id, movement_items in movement_rows.items():
         db.add(

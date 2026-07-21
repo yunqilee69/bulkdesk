@@ -48,6 +48,13 @@ async def _member_price(db: AsyncSession, product_id: str, level_id: str) -> Opt
         return None
     return Decimal(str(getattr(price, "price", price)))
 
+
+def _effective_order_price(
+    member_price: Decimal | None,
+    standard_price: Decimal,
+) -> Decimal:
+    return standard_price if member_price is None else member_price
+
 async def create_order(db: AsyncSession, req: OrderCreate, operator: str) -> Order:
     customer = (await db.execute(select(Customer).where(Customer.id == req.customer_id))).scalar_one_or_none()
     if not customer: raise ValueError("客户不存在")
@@ -88,7 +95,10 @@ async def create_order(db: AsyncSession, req: OrderCreate, operator: str) -> Ord
     db.add(order); await db.flush()
     total = Decimal("0")
     for item, product, allocations in planned_items:
-        unit_price = await _member_price(db, item.product_id, str(customer.level_id)) or Decimal(str(product.standard_price))
+        unit_price = _effective_order_price(
+            await _member_price(db, item.product_id, str(customer.level_id)),
+            Decimal(str(product.standard_price)),
+        )
         subtotal = unit_price * item.quantity; total += subtotal
         order_item = OrderItem(order_id=order.id, product_id=product.id, product_name=product.name, barcode=product.barcode, quantity=item.quantity, unit_price=unit_price, subtotal=subtotal)
         db.add(order_item); await db.flush()
@@ -424,8 +434,8 @@ async def transition_order(
         if complete_request is None:
             raise ValueError("收款信息不能为空")
         paid_amount = Decimal(str(complete_request.paid_amount))
-        if paid_amount > Decimal(str(order.total_amount)):
-            raise ValueError("实收金额不能超过订单金额")
+        if paid_amount > order.net_amount:
+            raise ValueError("实收金额不能超过订单应收金额")
         order.paid_amount = paid_amount
         order.payment_proof_image_urls = complete_request.payment_proof_image_urls
         await _complete(db, order, paid_amount)
@@ -485,12 +495,14 @@ async def _out(
     delivery_loaded: bool = False,
     latest_exception_loaded: bool = False,
 ):
-    out = OrderOut.model_validate(
-        {
-            column.name: getattr(order, column.name)
-            for column in Order.__table__.columns
-        }
-    )
+    order_data = {
+        column.name: getattr(order, column.name, None)
+        for column in Order.__table__.columns
+    }
+    returned_amount = order_data["returned_amount"] or Decimal("0.00")
+    order_data["returned_amount"] = returned_amount
+    order_data["net_amount"] = Decimal(str(order_data["total_amount"])) - Decimal(str(returned_amount))
+    out = OrderOut.model_validate(order_data)
     items = await _items(db, order.id)
     allocations = await _allocations(db, order.id)
     warehouse_ids = {allocation.warehouse_id for allocation in allocations}

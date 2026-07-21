@@ -8,6 +8,10 @@ import {
   getProductListImageUrl,
   getProductImagePreviewUrl,
   MAX_PRODUCT_IMAGES,
+  normalizeCostPrice,
+  normalizePriceChange,
+  normalizeProductCreatePrices,
+  normalizeSalePrice,
   validateProductImage,
 } from './form';
 
@@ -77,5 +81,21 @@ describe('product form helpers', () => {
       ]),
     ).toBe('https://example.com/first.png');
     expect(getProductListImageUrl()).toBeUndefined();
+  });
+
+  it('rejects zero sale prices while allowing zero cost prices', () => {
+    expect(() => normalizeSalePrice(0)).toThrow('售价必须大于0');
+    expect(normalizeCostPrice(0)).toBe(0);
+  });
+
+  it('rejects zero sale prices before product creation requests', () => {
+    expect(() => normalizeProductCreatePrices({ standard_price: 0, cost_price: 0 })).toThrow(
+      '售价必须大于0',
+    );
+  });
+
+  it('rejects zero standard-price adjustments while allowing zero cost-price adjustments', () => {
+    expect(() => normalizePriceChange('standard_price', 0)).toThrow('售价必须大于0');
+    expect(normalizePriceChange('cost_price', 0)).toBe(0);
   });
 });

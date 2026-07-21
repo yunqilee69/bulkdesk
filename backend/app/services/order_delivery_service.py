@@ -5,6 +5,7 @@ from uuid import UUID
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.permissions import has_any_role
 from app.models.customer import Customer
 from app.models.employee import Employee, EmployeeRole, EmployeeStatus
 from app.models.order import Order, OrderItem, OrderStatus
@@ -45,7 +46,7 @@ def _local_date_start_to_utc_naive(value: date) -> datetime:
 
 
 def _is_admin(employee: Employee) -> bool:
-    return employee.role == EmployeeRole.admin
+    return has_any_role(employee, EmployeeRole.admin)
 
 
 def _require_owner_or_admin(delivery: OrderDelivery, current_user: Employee) -> None:

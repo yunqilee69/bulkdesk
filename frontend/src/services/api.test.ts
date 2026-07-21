@@ -15,11 +15,11 @@ describe('currentUser', () => {
     localStorage.clear();
   });
 
-  it('loads employee identity from the server for a legacy access token', async () => {
-    localStorage.setItem('access_token', token({ sub: 'legacy-user', role: 'normal' }));
-    requestMock.mockResolvedValue({ code: 0, data: { id: 'employee-1', username: 'legacy-user', role: 'normal' } });
+  it('loads employee identity and role set from the server for a valid token', async () => {
+    localStorage.setItem('access_token', token({ sub: 'warehouse-user' }));
+    requestMock.mockResolvedValue({ code: 0, data: { id: 'employee-1', username: 'warehouse-user', name: '仓管甲', roles: ['warehouse_manager'] } });
 
-    await expect(currentUser()).resolves.toMatchObject({ id: 'employee-1', username: 'legacy-user' });
+    await expect(currentUser()).resolves.toMatchObject({ id: 'employee-1', username: 'warehouse-user', roles: ['warehouse_manager'] });
     expect(requestMock).toHaveBeenCalledWith('/api/v1/auth/me', { method: 'GET' });
   });
 
@@ -27,9 +27,9 @@ describe('currentUser', () => {
     ['401', () => Promise.reject(new Error('401'))],
     ['403', () => Promise.reject(new Error('403'))],
     ['network', () => Promise.reject(new Error('network'))],
-    ['malformed', () => Promise.resolve({ code: 0, data: { username: 'legacy-user', role: 'normal' } })],
+    ['malformed', () => Promise.resolve({ code: 0, data: { username: 'warehouse-user', roles: ['warehouse_manager'] } })],
   ])('fails closed when identity lookup returns %s', async (_case, response) => {
-    localStorage.setItem('access_token', token({ sub: 'legacy-user', role: 'normal', employee_id: 'untrusted-id' }));
+    localStorage.setItem('access_token', token({ sub: 'warehouse-user', employee_id: 'untrusted-id' }));
     requestMock.mockImplementation(response);
 
     await expect(currentUser()).resolves.toBeUndefined();

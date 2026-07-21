@@ -29,6 +29,33 @@ export function getProductListImageUrl(imageUrls?: string[]) {
   return imageUrls?.[0];
 }
 
+export function normalizeSalePrice(value: number): number {
+  if (value <= 0) throw new Error('售价必须大于0');
+  return value;
+}
+
+export function normalizeCostPrice(value: number): number {
+  if (value < 0) throw new Error('成本价不能小于0');
+  return value;
+}
+
+export function normalizeProductCreatePrices<T extends { standard_price: number; cost_price: number }>(
+  values: T,
+): T {
+  return {
+    ...values,
+    standard_price: normalizeSalePrice(values.standard_price),
+    cost_price: normalizeCostPrice(values.cost_price),
+  };
+}
+
+export function normalizePriceChange(
+  kind: 'standard_price' | 'cost_price',
+  value: number,
+): number {
+  return kind === 'standard_price' ? normalizeSalePrice(value) : normalizeCostPrice(value);
+}
+
 export function findProductImagePreviewIndex(
   fileList: UploadFile<UploadedImageResponse>[],
   file: UploadFile<UploadedImageResponse>,

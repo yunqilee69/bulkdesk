@@ -1,5 +1,6 @@
 from pydantic import Field
 
+from app.models.employee import EmployeeRole
 from app.schemas.common import ApiSchema
 
 class LoginRequest(ApiSchema):
@@ -16,7 +17,7 @@ class TokenResponse(ApiSchema):
 class CurrentUserResponse(ApiSchema):
     id: str
     username: str
-    role: str
+    roles: list[EmployeeRole]
 
 
 class RefreshRequest(ApiSchema):

@@ -2,9 +2,8 @@ import { request } from '@umijs/max';
 import type { ReturnProductCondition } from '@/pages/ReturnOrder/returnOrder';
 
 export interface ReturnOrderItemInput {
-  product_id: string;
+  source_order_item_id: string;
   quantity: number;
-  unit_price: number;
   condition: ReturnProductCondition;
   return_reason: string;
   remark?: string;
@@ -13,9 +12,29 @@ export interface ReturnOrderItemInput {
 }
 
 export interface ReturnOrderCreateInput {
-  customer_id: string;
+  handling_delivery_id: string;
   items: ReturnOrderItemInput[];
   remark?: string;
+}
+
+export interface ReturnableOrderItem {
+  source_order_item_id: string;
+  order_id: string;
+  order_no: string;
+  product_id: string;
+  product_name: string;
+  barcode: string;
+  unit_price: number;
+  sold_quantity: number;
+  returned_quantity: number;
+  returnable_quantity: number;
+}
+
+export async function listReturnableOrderItems(deliveryId: string) {
+  return request<API.ResponseBase<ReturnableOrderItem[]>>(
+    `/api/v1/deliveries/${deliveryId}/returnable-items`,
+    { method: 'GET' },
+  );
 }
 
 export async function listReturnOrders(params?: { status?: string; customer_id?: string; page?: number; page_size?: number }) {

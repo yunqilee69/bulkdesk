@@ -33,7 +33,7 @@
 | 重置密码 | `PUT /api/v1/employees/{id}/reset-password` | 管理员重置 |
 | 修改密码 | `PUT /api/v1/employees/me/password` | 员工自行修改 |
 
-**角色**: `admin`（管理员）、`normal`（普通用户）
+**角色**: 可多选：`admin`（全权限）、`warehouse_manager`（商品、基础资料、库存和订单操作）、`delivery`（本人配送、签收、收款和现场退货）、`finance`（财务数据读取和订单确认收款）。客户创建、编辑和员工管理仅 `admin`。
 
 ---
 
@@ -78,7 +78,7 @@
 
 **等级字段**: name、min_spent（最低消费门槛）、sort_order、is_default
 
-会员价按 `商品 + 客户等级` 独立设置；未设置时使用商品标准售价。
+会员价按 `商品 + 客户等级` 独立设置；未设置时使用商品标准售价。标准售价和会员价必须大于零，成本价允许为零。客户等级当前只作为人工维护记录，不自动升降级。
 
 ---
 
@@ -182,7 +182,7 @@
 
 **履约审计字段**: shipping_started、stock_out、delivered、paid、cancelled 各阶段均记录时间与操作人。
 
-> 下单时系统自动跨仓预占库存；开始发货和调整分仓只改变预占，确认出库时才扣减实际库存。出库后退回商品使用独立退货单。
+> 下单时系统自动跨仓预占库存；开始发货和调整分仓只改变预占，确认出库时才扣减实际库存。出库后退回商品必须从配送任务发起退货，并关联历史来源订单明细。
 
 ### 6.1 配送管理
 
@@ -212,12 +212,13 @@
 
 | 功能 | API | 说明 |
 |------|-----|------|
-| 创建退货单 | `POST /api/v1/return-orders` | 独立退货，逐项选择是否入库，直接完成 |
+| 可退历史商品 | `GET /api/v1/deliveries/{delivery_id}/returnable-items` | 当前配送员查看同一客户的历史可退订单明细 |
+| 创建退货单 | `POST /api/v1/return-orders` | 从本人配送中的任务发起，来源订单明细和单价由服务端派生 |
 | 退货单列表 | `GET /api/v1/return-orders` | 按客户、状态分页筛选 |
 | 退货单详情 | `GET /api/v1/return-orders/{id}` | 查看库存与消费冲减审计 |
 | 作废退货单 | `PUT /api/v1/return-orders/{id}/void` | 扣回原入库并恢复实际消费冲减 |
 
-退货单不依赖原销售订单，不减少客户订单数，不自动调整客户等级。完整流程见 `docs/modules/return-order.md`。
+退货单必须关联配送任务和历史来源订单明细；原订单总额不变，`returned_amount` 增加并派生 `net_amount`。已完成订单退货还会冲减实际累计消费；不自动调整客户等级。完整流程见 `docs/modules/return-order.md`。
 
 ---
 
@@ -238,7 +239,7 @@
 | 功能 | API | 说明 |
 |------|-----|------|
 | 登录 | `POST /api/v1/auth/login` | 返回 access_token + refresh_token |
-| 当前身份 | `GET /api/v1/auth/me` | 返回当前员工 id、username、role，前端据此判断本人记录与角色权限 |
+| 当前身份 | `GET /api/v1/auth/me` | 返回当前员工 id、username、roles，前端据此判断本人记录与角色权限 |
 | 刷新令牌 | `POST /api/v1/auth/refresh` | 用 refresh_token 换新 access_token |
 | 登出 | `POST /api/v1/auth/logout` | 失效当前令牌 |
 

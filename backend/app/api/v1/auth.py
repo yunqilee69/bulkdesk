@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.deps import CurrentUser, oauth2_scheme
+from app.core.permissions import role_values
 from app.core.redis import get_redis
 from app.schemas.auth import CurrentUserResponse, LoginRequest, RefreshRequest, TokenResponse
 from app.schemas.common import ResponseBase
@@ -20,7 +21,7 @@ async def current_user(current_user: CurrentUser):
         data=CurrentUserResponse(
             id=str(current_user.id),
             username=current_user.username,
-            role=current_user.role.value,
+            roles=sorted(role_values(current_user)),
         )
     )
 

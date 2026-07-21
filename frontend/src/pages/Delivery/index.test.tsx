@@ -233,7 +233,7 @@ describe('DeliveryPage', () => {
     expect(mocks.listCurrentDeliveries).toHaveBeenCalledWith(undefined);
   });
 
-  it('relies on backend self scope for normal employees and hides reassignment', async () => {
+  it('relies on backend self scope for delivery employees and hides reassignment', async () => {
     isAdmin = false;
     mocks.listCurrentDeliveries.mockResolvedValue({ code: 0, data: [currentGroups[0]] });
     render(<DeliveryPage />);

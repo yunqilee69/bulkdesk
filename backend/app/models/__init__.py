@@ -1,5 +1,10 @@
 from app.models.base import TimestampMixin, UUIDMixin
-from app.models.employee import Employee, EmployeeRole, EmployeeStatus
+from app.models.employee import (
+    Employee,
+    EmployeeRole,
+    EmployeeRoleAssignment,
+    EmployeeStatus,
+)
 from app.models.customer import (
     Customer,
     CustomerLevel,
@@ -52,6 +57,7 @@ __all__ = [
     "TimestampMixin",
     "Employee",
     "EmployeeRole",
+    "EmployeeRoleAssignment",
     "EmployeeStatus",
     "Customer",
     "CustomerLevel",

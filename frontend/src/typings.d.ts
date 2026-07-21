@@ -8,12 +8,13 @@ declare module '*.jpeg';
 declare module '*.gif';
 
 declare namespace API {
+  type EmployeeRole = 'admin' | 'warehouse_manager' | 'delivery' | 'finance';
   interface CurrentUser {
-    id?: string;
+    id: string;
     username: string;
-    role: string;
+    name: string;
+    roles: EmployeeRole[];
     avatar?: string;
-    access?: string;
   }
   interface ResponseBase<T = any> {
     code: number;

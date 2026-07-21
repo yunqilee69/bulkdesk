@@ -128,7 +128,7 @@ export function extractDeliveryProofUrls(fileList: UploadFile<DeliveryProofRespo
 }
 
 export type DeliveryAction = 'sign' | 'exception' | 'reassign';
-export type DeliveryUserRole = 'admin' | 'normal';
+export type DeliveryUserRole = 'admin' | 'delivery';
 
 export function canHandleDelivery(
   isAdmin: boolean,

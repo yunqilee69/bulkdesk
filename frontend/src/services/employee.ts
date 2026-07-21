@@ -5,10 +5,10 @@ export async function listEmployees(params?: { keyword?: string; page?: number; 
 export async function getEmployee(id: string) {
   return request<API.ResponseBase>(`/api/v1/employees/${id}`, { method: 'GET' });
 }
-export async function createEmployee(data: { username: string; password: string; name: string; phone?: string; role: string }) {
+export async function createEmployee(data: { username: string; password: string; name: string; phone?: string; roles: API.EmployeeRole[] }) {
   return request<API.ResponseBase>('/api/v1/employees', { method: 'POST', data });
 }
-export async function updateEmployee(id: string, data: { name?: string; phone?: string; role?: string }) {
+export async function updateEmployee(id: string, data: { name?: string; phone?: string; roles?: API.EmployeeRole[] }) {
   return request<API.ResponseBase>(`/api/v1/employees/${id}`, { method: 'PUT', data });
 }
 export async function disableEmployee(id: string) {

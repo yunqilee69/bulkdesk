@@ -3,9 +3,11 @@ from typing import Optional
 from redis.asyncio import Redis
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
+from app.core.permissions import has_any_role
 from app.core.security import get_password_hash, verify_password
-from app.models.employee import Employee, EmployeeRole, EmployeeStatus
+from app.models.employee import Employee, EmployeeRole, EmployeeRoleAssignment, EmployeeStatus
 from app.schemas.common import PaginatedResponse
 from app.schemas.employee import EmployeeCreate, EmployeeOut, EmployeeUpdate
 
@@ -20,11 +22,11 @@ async def create_employee(db: AsyncSession, req: EmployeeCreate) -> Employee:
         password_hash=get_password_hash(req.password),
         name=req.name,
         phone=req.phone,
-        role=req.role,
+        role_assignments=[EmployeeRoleAssignment(role=role) for role in req.roles],
     )
     db.add(employee)
     await db.flush()
-    await db.refresh(employee)
+    await db.refresh(employee, attribute_names=["role_assignments"])
     return employee
 
 
@@ -34,7 +36,7 @@ async def list_employees(
     page_size: int = 20,
     keyword: Optional[str] = None,
 ) -> PaginatedResponse[EmployeeOut]:
-    query = select(Employee)
+    query = select(Employee).options(selectinload(Employee.role_assignments))
     count_query = select(func.count()).select_from(Employee)
 
     if keyword:
@@ -57,7 +59,11 @@ async def list_employees(
 
 
 async def get_employee(db: AsyncSession, employee_id: str) -> Employee:
-    result = await db.execute(select(Employee).where(Employee.id == employee_id))
+    result = await db.execute(
+        select(Employee)
+        .options(selectinload(Employee.role_assignments))
+        .where(Employee.id == employee_id)
+    )
     employee = result.scalar_one_or_none()
     if employee is None:
         raise ValueError("Employee not found")
@@ -69,10 +75,10 @@ async def update_employee(
 ) -> Employee:
     employee = await get_employee(db, employee_id)
 
-    if req.status == EmployeeStatus.disabled and employee.role == EmployeeRole.admin:
+    if req.status == EmployeeStatus.disabled and has_any_role(employee, EmployeeRole.admin):
         admin_count_result = await db.execute(
-            select(func.count()).select_from(Employee).where(
-                Employee.role == EmployeeRole.admin,
+            select(func.count()).select_from(Employee).join(EmployeeRoleAssignment).where(
+                EmployeeRoleAssignment.role == EmployeeRole.admin,
                 Employee.status == EmployeeStatus.active,
             )
         )
@@ -81,11 +87,17 @@ async def update_employee(
             raise ValueError("Cannot disable the last active admin")
 
     update_data = req.model_dump(exclude_unset=True)
+    roles = update_data.pop("roles", None)
     for field, value in update_data.items():
         setattr(employee, field, value)
 
+    if roles is not None:
+        employee.role_assignments = [
+            EmployeeRoleAssignment(role=role) for role in roles
+        ]
+
     await db.flush()
-    await db.refresh(employee)
+    await db.refresh(employee, attribute_names=["role_assignments"])
     return employee
 
 
@@ -94,12 +106,12 @@ async def disable_employee(
 ) -> Employee:
     employee = await get_employee(db, employee_id)
 
-    if employee.role == EmployeeRole.admin:
+    if has_any_role(employee, EmployeeRole.admin):
         raise ValueError("Cannot disable admin user")
 
     employee.status = EmployeeStatus.disabled
     await db.flush()
-    await db.refresh(employee)
+    await db.refresh(employee, attribute_names=["role_assignments"])
     return employee
 
 
@@ -107,7 +119,7 @@ async def enable_employee(db: AsyncSession, employee_id: str) -> Employee:
     employee = await get_employee(db, employee_id)
     employee.status = EmployeeStatus.active
     await db.flush()
-    await db.refresh(employee)
+    await db.refresh(employee, attribute_names=["role_assignments"])
     return employee
 
 

@@ -5,6 +5,8 @@ import {
   getChangedMemberPriceItems,
   getEnteredMemberPriceItems,
   getMemberPriceChangeState,
+  getValidatedChangedMemberPriceItems,
+  normalizeMemberPrice,
 } from './memberPrices';
 
 describe('member price helpers', () => {
@@ -20,17 +22,30 @@ describe('member price helpers', () => {
     ]);
   });
 
-  it('submits only entered member prices and keeps zero as valid', () => {
+  it('submits only entered positive member prices', () => {
     expect(
       getEnteredMemberPriceItems([
-        { level_id: 'normal', level_name: '普通会员', draftPrice: 0 },
+        { level_id: 'normal', level_name: '普通会员', draftPrice: 50 },
         { level_id: 'gold', level_name: '黄金会员', draftPrice: 88 },
         { level_id: 'silver', level_name: '白银会员', draftPrice: undefined },
       ]),
     ).toEqual([
-      { level_id: 'normal', price: 0 },
+      { level_id: 'normal', price: 50 },
       { level_id: 'gold', price: 88 },
     ]);
+  });
+
+  it('rejects zero member prices', () => {
+    expect(() => normalizeMemberPrice(0)).toThrow('会员价必须大于0');
+  });
+
+  it('keeps zero member-price drafts renderable but rejects them before saving', () => {
+    const rows = [
+      { level_id: 'normal', level_name: '普通会员', price: 80, draftPrice: 0 },
+    ];
+
+    expect(getChangedMemberPriceItems(rows)).toEqual([{ level_id: 'normal', price: 0 }]);
+    expect(() => getValidatedChangedMemberPriceItems(rows)).toThrow('会员价必须大于0');
   });
 
   it('identifies new and changed prices without requiring a reason', () => {

@@ -82,11 +82,11 @@ class CustomerLevelOut(ApiSchema):
 class MemberPriceCreate(ApiSchema):
     product_id: str
     level_id: str
-    price: float = Field(..., ge=0)
+    price: float = Field(..., gt=0)
 
 
 class MemberPriceUpdate(ApiSchema):
-    price: float = Field(..., ge=0)
+    price: float = Field(..., gt=0)
 
 
 class MemberPriceOut(ApiSchema):

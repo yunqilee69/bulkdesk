@@ -57,7 +57,7 @@ class CategoryOut(CategoryCreate):
 
 class MemberPriceBatchItem(ApiSchema):
     level_id: str
-    price: float = Field(..., ge=0)
+    price: float = Field(..., gt=0)
 
 
 class ProductCreate(ApiSchema):
@@ -68,7 +68,7 @@ class ProductCreate(ApiSchema):
     brand_id: Optional[str] = None
     specification: Optional[str] = Field(None, max_length=200)
     unit: str = Field(..., min_length=1, max_length=20)
-    standard_price: float = Field(..., ge=0)
+    standard_price: float = Field(..., gt=0)
     cost_price: float = Field(..., ge=0)
     price_reason: str = Field("", max_length=255)
     member_prices: list[MemberPriceBatchItem] = Field(default_factory=list)
@@ -132,12 +132,21 @@ class ProductOut(ApiSchema):
     def default_warning_quantity(cls, value): return 0 if value is None else value
 
 
-class PriceChangeRequest(ApiSchema):
+class SalePriceChangeRequest(ApiSchema):
+    price: float = Field(..., gt=0)
+    reason: str = Field("", max_length=255)
+
+
+class CostPriceChangeRequest(ApiSchema):
     price: float = Field(..., ge=0)
     reason: str = Field("", max_length=255)
 
 
-class MemberPriceRequest(PriceChangeRequest):
+class MemberPriceRequest(SalePriceChangeRequest):
+    pass
+
+
+class PriceChangeRequest(CostPriceChangeRequest):
     pass
 
 

@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.deps import AdminUser, CurrentUser
+from app.core.deps import CurrentUser, WarehouseUser
 from app.schemas.common import PaginatedResponse, ResponseBase
 from app.schemas.inventory import (
     BatchStockInRequest,
@@ -56,7 +56,7 @@ router = APIRouter(tags=["Inventory"])
 )
 async def create_sup(
     req: SupplierCreate,
-    admin: AdminUser,
+    current_user: WarehouseUser,
     db: AsyncSession = Depends(get_db),
 ):
     supplier = await create_supplier(db, req)
@@ -84,7 +84,7 @@ async def list_sup(
 async def update_sup(
     supplier_id: str,
     req: SupplierUpdate,
-    admin: AdminUser,
+    current_user: WarehouseUser,
     db: AsyncSession = Depends(get_db),
 ):
     try:
@@ -104,7 +104,7 @@ async def update_sup(
 )
 async def create_wh(
     req: WarehouseCreate,
-    admin: AdminUser,
+    current_user: WarehouseUser,
     db: AsyncSession = Depends(get_db),
 ):
     wh = await create_warehouse(db, req)
@@ -132,7 +132,7 @@ async def list_wh(
 async def update_wh(
     warehouse_id: str,
     req: WarehouseUpdate,
-    admin: AdminUser,
+    current_user: WarehouseUser,
     db: AsyncSession = Depends(get_db),
 ):
     try:
@@ -166,7 +166,7 @@ async def list_inv(
 @router.post("/stock-in", response_model=ResponseBase[InventoryOut])
 async def stock_in_op(
     req: StockInRequest,
-    current_user: CurrentUser = None,
+    current_user: WarehouseUser,
     db: AsyncSession = Depends(get_db),
 ):
     try:
@@ -179,7 +179,7 @@ async def stock_in_op(
 @router.post("/stock-in/batch", response_model=ResponseBase[InventoryMovementOut])
 async def batch_stock_in_op(
     req: BatchStockInRequest,
-    current_user: CurrentUser = None,
+    current_user: WarehouseUser,
     db: AsyncSession = Depends(get_db),
 ):
     try:
@@ -192,7 +192,7 @@ async def batch_stock_in_op(
 @router.post("/stock-out", response_model=ResponseBase[InventoryOut])
 async def stock_out_op(
     req: StockOutRequest,
-    current_user: CurrentUser = None,
+    current_user: WarehouseUser,
     db: AsyncSession = Depends(get_db),
 ):
     try:
@@ -205,7 +205,7 @@ async def stock_out_op(
 @router.post("/stock-out/batch", response_model=ResponseBase[InventoryMovementOut])
 async def batch_stock_out_op(
     req: BatchStockOutRequest,
-    current_user: CurrentUser = None,
+    current_user: WarehouseUser,
     db: AsyncSession = Depends(get_db),
 ):
     try:
@@ -218,7 +218,7 @@ async def batch_stock_out_op(
 @router.post("/transfer", response_model=ResponseBase)
 async def transfer_op(
     req: TransferRequest,
-    current_user: CurrentUser = None,
+    current_user: WarehouseUser,
     db: AsyncSession = Depends(get_db),
 ):
     try:
@@ -231,7 +231,7 @@ async def transfer_op(
 @router.post("/transfer/batch", response_model=ResponseBase[InventoryMovementOut])
 async def batch_transfer_op(
     req: BatchTransferRequest,
-    current_user: CurrentUser = None,
+    current_user: WarehouseUser,
     db: AsyncSession = Depends(get_db),
 ):
     try:
@@ -244,7 +244,7 @@ async def batch_transfer_op(
 @router.post("/stocktake", response_model=ResponseBase[InventoryOut])
 async def stocktake_op(
     req: StocktakeRequest,
-    current_user: CurrentUser = None,
+    current_user: WarehouseUser,
     db: AsyncSession = Depends(get_db),
 ):
     try:
@@ -257,7 +257,7 @@ async def stocktake_op(
 @router.post("/stocktake/batch", response_model=ResponseBase[InventoryMovementOut])
 async def batch_stocktake_op(
     req: BatchStocktakeRequest,
-    current_user: CurrentUser = None,
+    current_user: WarehouseUser,
     db: AsyncSession = Depends(get_db),
 ):
     try:

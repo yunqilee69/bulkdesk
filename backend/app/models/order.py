@@ -60,6 +60,9 @@ class Order(UUIDMixin, TimestampMixin, Base):
         ForeignKey("customers.id"), nullable=False
     )
     total_amount: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
+    returned_amount: Mapped[Decimal] = mapped_column(
+        Numeric(12, 2), nullable=False, default=Decimal("0.00")
+    )
     status: Mapped[OrderStatus] = mapped_column(
         Enum(OrderStatus, name="order_status", native_enum=True),
         default=OrderStatus.placed,
@@ -88,6 +91,11 @@ class Order(UUIDMixin, TimestampMixin, Base):
     delivery: Mapped[Optional["OrderDelivery"]] = relationship(
         back_populates="order", uselist=False
     )
+
+    @property
+    def net_amount(self) -> Decimal:
+        returned_amount = self.returned_amount or Decimal("0.00")
+        return Decimal(str(self.total_amount)) - Decimal(str(returned_amount))
 
 
 class OrderItem(UUIDMixin, TimestampMixin, Base):

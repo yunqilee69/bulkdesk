@@ -186,6 +186,8 @@ class OrderOut(ApiSchema):
     customer_id: str
     customer_name: Optional[str] = None
     total_amount: float
+    returned_amount: float
+    net_amount: float
     status: OrderStatus
     remark: Optional[str]
     shipping_started_at: Optional[datetime]

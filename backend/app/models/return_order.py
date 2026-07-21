@@ -31,6 +31,9 @@ class ReturnOrder(UUIDMixin, TimestampMixin, Base):
 
     return_no: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     customer_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("customers.id"), nullable=False)
+    handling_delivery_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("order_deliveries.id"), nullable=False
+    )
     total_amount: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
     status: Mapped[ReturnOrderStatus] = mapped_column(
         Enum(ReturnOrderStatus, name="return_order_status", native_enum=True),
@@ -68,6 +71,9 @@ class ReturnOrderItem(UUIDMixin, TimestampMixin, Base):
 
     return_order_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("return_orders.id"), nullable=False
+    )
+    source_order_item_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("order_items.id"), nullable=False
     )
     product_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("products.id"), nullable=False)
     product_name: Mapped[str] = mapped_column(String(200), nullable=False)

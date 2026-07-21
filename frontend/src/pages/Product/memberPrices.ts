@@ -18,9 +18,16 @@ export function createMemberPriceRows(levels: MemberLevelOption[]): MemberPriceR
   }));
 }
 
+export function normalizeMemberPrice(value: number): number {
+  if (value <= 0) throw new Error('会员价必须大于0');
+  return value;
+}
+
 export function getEnteredMemberPriceItems(rows: MemberPriceRow[]) {
   return rows.flatMap((row) =>
-    row.draftPrice === undefined ? [] : [{ level_id: row.level_id, price: row.draftPrice }],
+    row.draftPrice === undefined
+      ? []
+      : [{ level_id: row.level_id, price: normalizeMemberPrice(row.draftPrice) }],
   );
 }
 
@@ -29,6 +36,13 @@ export function getChangedMemberPriceItems(rows: MemberPriceRow[]) {
     if (row.draftPrice === undefined || row.draftPrice === row.price) return [];
     return [{ level_id: row.level_id, price: row.draftPrice }];
   });
+}
+
+export function getValidatedChangedMemberPriceItems(rows: MemberPriceRow[]) {
+  return getChangedMemberPriceItems(rows).map((item) => ({
+    ...item,
+    price: normalizeMemberPrice(item.price),
+  }));
 }
 
 export function getMemberPriceChangeState(row: MemberPriceRow) {

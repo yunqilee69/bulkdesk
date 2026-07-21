@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.deps import CurrentUser
+from app.core.deps import AdminUser, CurrentUser
 from app.schemas.common import PaginatedResponse, ResponseBase
 from app.schemas.customer import CustomerCreate, CustomerOut, CustomerUpdate
 from app.services.customer_service import (
@@ -18,7 +18,7 @@ router = APIRouter(prefix="/customers", tags=["Customer"])
 @router.post("", response_model=ResponseBase[CustomerOut], status_code=status.HTTP_201_CREATED)
 async def create(
     req: CustomerCreate,
-    current_user: CurrentUser = None,
+    current_user: AdminUser,
     db: AsyncSession = Depends(get_db),
 ):
     try:
@@ -63,7 +63,7 @@ async def get(
 async def update(
     customer_id: str,
     req: CustomerUpdate,
-    current_user: CurrentUser = None,
+    current_user: AdminUser,
     db: AsyncSession = Depends(get_db),
 ):
     try:

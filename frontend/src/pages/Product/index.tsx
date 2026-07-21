@@ -33,6 +33,8 @@ import {
   getProductListImageUrl,
   getProductImagePreviewUrl,
   MAX_PRODUCT_IMAGES,
+  normalizePriceChange,
+  normalizeProductCreatePrices,
   validateProductImage,
 } from './form';
 import {
@@ -40,6 +42,7 @@ import {
   getChangedMemberPriceItems,
   getEnteredMemberPriceItems,
   getMemberPriceChangeState,
+  getValidatedChangedMemberPriceItems,
 } from './memberPrices';
 import type { MemberPriceRow } from './memberPrices';
 import { toPriceChartData } from './priceChart';
@@ -295,7 +298,7 @@ export default function ProductList() {
               label="标准售价"
               rules={[{ required: true, message: '请输入标准售价' }]}
             >
-              <InputNumber min={0} precision={2} prefix="¥" suffix="元" style={{ width: '100%' }} />
+              <InputNumber min={0.01} precision={2} prefix="¥" suffix="元" style={{ width: '100%' }} />
             </ProForm.Item>
           </Col>
           <Col span={12}>
@@ -320,7 +323,7 @@ export default function ProductList() {
                   title: '会员价',
                   render: (_, row) => (
                     <InputNumber
-                      min={0}
+                      min={0.01}
                       precision={2}
                       prefix="¥"
                       suffix="元"
@@ -420,23 +423,33 @@ export default function ProductList() {
         initialValues={editing ?? { status: 'active', unit: '件' }}
         modalProps={{ destroyOnHidden: true }}
         onFinish={async (values) => {
-          const payload = {
-            ...values,
-            image_urls: extractUploadedImageUrls(imageFileList),
-            ...(!editing
-              ? { member_prices: getEnteredMemberPriceItems(newProductMemberPriceRows) }
-              : {}),
-          };
-          const response = editing
-            ? await updateProduct(editing.id, payload)
-            : await createProduct(payload as Parameters<typeof createProduct>[0]);
-          if (response.code === 0) {
-            message.success('保存成功');
-            actionRef.current?.reload();
-            return true;
+          try {
+            const payload = {
+              ...values,
+              image_urls: extractUploadedImageUrls(imageFileList),
+              ...(!editing
+                ? {
+                    ...normalizeProductCreatePrices(
+                      values as { standard_price: number; cost_price: number },
+                    ),
+                    member_prices: getEnteredMemberPriceItems(newProductMemberPriceRows),
+                  }
+                : {}),
+            };
+            const response = editing
+              ? await updateProduct(editing.id, payload)
+              : await createProduct(payload as Parameters<typeof createProduct>[0]);
+            if (response.code === 0) {
+              message.success('保存成功');
+              actionRef.current?.reload();
+              return true;
+            }
+            message.error(response.message || '保存失败');
+            return false;
+          } catch (error) {
+            message.warning(error instanceof Error ? error.message : '请输入有效价格');
+            return false;
           }
-          message.error(response.message || '保存失败');
-          return false;
         }}
         onOpenChange={(nextOpen) => {
           setOpen(nextOpen);
@@ -514,8 +527,15 @@ function PriceEditor({ product, onSaved }: { product: ProductRecord; onSaved: ()
   }, [product]);
 
   const submit = async (kind: 'standard_price' | 'cost_price') => {
-    const price = kind === 'standard_price' ? standard : cost;
-    if (price === undefined || price < 0) return message.warning('请输入有效价格');
+    const value = kind === 'standard_price' ? standard : cost;
+    if (value === undefined) return message.warning('请输入有效价格');
+    let price: number;
+    try {
+      price = normalizePriceChange(kind, value);
+    } catch (error) {
+      message.warning(error instanceof Error ? error.message : '请输入有效价格');
+      return;
+    }
     const response = await changeProductPrice(product.id, kind, { price, reason: reason.trim() });
     if (response.code === 0) {
       message.success('价格已调整');
@@ -535,10 +555,17 @@ function PriceEditor({ product, onSaved }: { product: ProductRecord; onSaved: ()
       message.warning('请先修改或新增会员价');
       return;
     }
+    let validatedMemberPrices: ReturnType<typeof getValidatedChangedMemberPriceItems>;
+    try {
+      validatedMemberPrices = getValidatedChangedMemberPriceItems(memberPriceRows);
+    } catch (error) {
+      message.warning(error instanceof Error ? error.message : '请输入有效会员价');
+      return;
+    }
     setMemberPricesSaving(true);
     try {
       const response = await batchUpdateMemberPrices(product.id, {
-        items: changedMemberPrices,
+        items: validatedMemberPrices,
         ...(reason.trim() ? { reason: reason.trim() } : {}),
       });
       if (response.code !== 0) {
@@ -560,7 +587,7 @@ function PriceEditor({ product, onSaved }: { product: ProductRecord; onSaved: ()
       <span>标准售价</span>
       <Space.Compact style={{ width: '100%' }}>
         <InputNumber
-          min={0}
+          min={0.01}
           precision={2}
           prefix="¥"
           suffix="元"
@@ -604,7 +631,7 @@ function PriceEditor({ product, onSaved }: { product: ProductRecord; onSaved: ()
             title: '新价格',
             render: (_, row) => (
               <InputNumber
-                min={0}
+                min={0.01}
                 precision={2}
                 prefix="¥"
                 suffix="元"

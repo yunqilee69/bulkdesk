@@ -18,7 +18,7 @@ import {
 } from '@/services/customer';
 import React, { useRef, useEffect, useMemo, useState } from 'react';
 import type { ActionType, ProColumns } from '@ant-design/pro-components';
-import { request, useLocation } from '@umijs/max';
+import { request, useAccess, useLocation } from '@umijs/max';
 
 interface CustomerRecord {
   id: string;
@@ -42,6 +42,7 @@ interface LevelOption {
 
 const Customer: React.FC = () => {
   const location = useLocation();
+  const access = useAccess();
   const actionRef = useRef<ActionType>(null);
   const [createModalOpen, handleCreateModalOpen] = useState(false);
   const [editModalOpen, handleEditModalOpen] = useState(false);
@@ -127,18 +128,21 @@ const Customer: React.FC = () => {
     {
       title: '操作',
       valueType: 'option',
-      render: (_, record) => [
-        <Button
-          key="edit"
-          type="link"
-          onClick={() => {
-            setCurrentRow(record);
-            handleEditModalOpen(true);
-          }}
-        >
-          编辑
-        </Button>,
-      ],
+      render: (_, record) =>
+        access.canAdmin
+          ? [
+              <Button
+                key="edit"
+                type="link"
+                onClick={() => {
+                  setCurrentRow(record);
+                  handleEditModalOpen(true);
+                }}
+              >
+                编辑
+              </Button>,
+            ]
+          : [],
     },
   ];
 
@@ -183,11 +187,15 @@ const Customer: React.FC = () => {
         search={{
           labelWidth: 120,
         }}
-        toolBarRender={() => [
-          <Button key="create" type="primary" onClick={() => handleCreateModalOpen(true)}>
-            新建客户
-          </Button>,
-        ]}
+        toolBarRender={() =>
+          access.canAdmin
+            ? [
+                <Button key="create" type="primary" onClick={() => handleCreateModalOpen(true)}>
+                  新建客户
+                </Button>,
+              ]
+            : []
+        }
         request={async (params) => {
           const res = await listCustomers({
             keyword: (params.name as string | undefined) ?? (params.routeKeyword as string | undefined),

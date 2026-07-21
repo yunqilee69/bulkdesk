@@ -49,7 +49,7 @@ function proofFile(
 }
 
 describe('delivery helpers', () => {
-  it('requires a normal employee to own the delivery before handling it', () => {
+  it('requires a delivery employee to own the delivery before handling it', () => {
     expect(canHandleDelivery(false, true, 'delivering')).toBe(true);
     expect(canHandleDelivery(false, false, 'delivering')).toBe(false);
   });
@@ -143,14 +143,14 @@ describe('delivery helpers', () => {
     ]);
   });
 
-  it('allows administrators to act on all current deliveries and normal employees only on their own', () => {
+  it('allows administrators to act on all current deliveries and delivery employees only on their own', () => {
     expect(getDeliveryActions('admin', false, 'delivering')).toEqual([
       'sign',
       'exception',
       'reassign',
     ]);
-    expect(getDeliveryActions('normal', true, 'delivering')).toEqual(['sign', 'exception']);
-    expect(getDeliveryActions('normal', false, 'delivering')).toEqual([]);
+    expect(getDeliveryActions('delivery', true, 'delivering')).toEqual(['sign', 'exception']);
+    expect(getDeliveryActions('delivery', false, 'delivering')).toEqual([]);
     expect(getDeliveryActions('admin', true, 'signed')).toEqual([]);
   });
 });

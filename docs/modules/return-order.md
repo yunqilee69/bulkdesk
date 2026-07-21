@@ -1,55 +1,35 @@
 # 退货单模块
 
-## 概述
+## 业务边界
 
-退货单是独立业务单据，不要求关联原销售订单。适用于商品送达客户后现场退货：记录客户、商品、数量、退货单价、商品状况和退货原因，并由每条明细独立决定是否入库。
+退货由配送员从**本人当前配送中**的配送任务发起。该任务只用于确认办理人和客户；退货明细可以选择该客户任意历史 `stocked_out`、`delivered_unpaid` 或 `completed` 订单的商品明细。商品、条码和单价均由来源订单明细派生，前端不得自由填写。
 
-## 状态图
+客户等级当前仅人工维护；订单完成和退货只更新 `total_spent`，不自动升降级或写等级变更日志。
+
+## 状态与金额
 
 ```mermaid
 stateDiagram-v2
-    [*] --> completed: 创建并处理退货
-    completed --> voided: 作废并反向处理
-    voided --> [*]
+    [*] --> completed: 配送员创建并处理
+    completed --> voided: 管理员作废
 ```
 
-- `completed`：退货记录、可选入库和客户累计消费冲减已完成。
-- `voided`：原入库和累计消费冲减已反向恢复。
-- 已完成退货单不可编辑或删除，只能填写原因后作废。
+- 原订单 `total_amount` 永不修改。
+- 创建退货时增加来源订单 `returned_amount`，`net_amount = total_amount - returned_amount`。
+- 未收款订单仅降低净应收；来源订单已完成时，同时按实际冲减额降低客户 `total_spent`。
+- 同一来源订单明细的所有已完成退货数量不能超过原销售数量；创建和作废都使用行锁。
 
-## 创建事务
+## 创建与作废
 
-1. 锁定客户，校验商品和启用仓库。
-2. 入库明细必须选择仓库；不入库明细不得保留仓库。
-3. 对入库明细增加指定仓库库存，按仓库生成 `customer_return_in` 流水。
-4. 退货金额按可编辑退货单价乘数量汇总。
-5. 客户累计消费更新为 `max(0, total_spent - total_amount)`。
-6. 保存 `customer_spent_before`、`customer_spent_after` 和实际冲减额 `spend_deduction_amount`。
-7. 不减少客户 `order_count`，不调整客户等级，退货单直接进入 `completed`。
+创建在同一事务中锁定配送任务、客户、来源订单明细及退货数量，验证配送归属、客户一致性、状态、可退数量和入库仓库；随后写入退货单、库存流水、订单退货金额及客户消费审计。
 
-## 作废事务
+仅管理员可作废。作废会扣回此前入库库存、回退来源订单 `returned_amount`，并恢复创建时实际扣减的客户累计消费；已作废退货单不可重复作废。
 
-1. 锁定退货单、客户和原入库仓库库存。
-2. 原入库商品必须有足够未锁定库存可扣回，否则整单作废失败。
-3. 按仓库生成 `customer_return_void_out` 流水。
-4. 只恢复创建时实际冲减的 `spend_deduction_amount`，不恢复因累计消费触底而未扣除的金额。
-5. 记录 `voided_by`、`voided_at`、`void_reason` 和作废前后累计消费审计值。
+## API 与前端
 
-## 前端批量处理
+- `GET /api/v1/deliveries/{delivery_id}/returnable-items`：配送员加载历史可退商品。
+- `POST /api/v1/return-orders`：提交 `handling_delivery_id` 和每条 `source_order_item_id`、数量、原因、状况、入库信息。
+- `GET /api/v1/return-orders`、`GET /api/v1/return-orders/{id}`：所有登录用户查看记录。
+- `PUT /api/v1/return-orders/{id}/void`：仅管理员。
 
-页面位于 `/order/returns`。新建 Modal 使用公共 `ProductSelectModal`，支持勾选多条明细后批量：
-
-- 设为入库并指定仓库；
-- 设为不入库并清空仓库；
-- 设置商品状况；
-- 设置退货原因；
-- 批量设置后继续逐条覆盖。
-
-页面同时提供列表、详情 Drawer 和作废 Modal。
-
-## API
-
-- `POST /api/v1/return-orders`
-- `GET /api/v1/return-orders`
-- `GET /api/v1/return-orders/{id}`
-- `PUT /api/v1/return-orders/{id}/void`
+配送页面提供“现场退货”入口。`/order/returns` 仅保留退货记录查看和管理员作废，不能创建自由退货单。

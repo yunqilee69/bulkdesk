@@ -3,21 +3,27 @@ from datetime import datetime, timezone
 from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
+from app.core.permissions import normalize_roles
 from app.core.security import (
     create_access_token,
     create_refresh_token,
     decode_token,
     verify_password,
 )
-from app.models.employee import Employee, EmployeeStatus
+from app.models.employee import Employee, EmployeeRole, EmployeeStatus
 from app.schemas.auth import LoginRequest, RefreshRequest, TokenResponse
 
 
 async def login(
     db: AsyncSession, redis: Redis, req: LoginRequest
 ) -> TokenResponse:
-    result = await db.execute(select(Employee).where(Employee.username == req.username))
+    result = await db.execute(
+        select(Employee)
+        .options(selectinload(Employee.role_assignments))
+        .where(Employee.username == req.username)
+    )
     employee = result.scalar_one_or_none()
     if employee is None:
         raise ValueError("Invalid username or password")
@@ -26,10 +32,11 @@ async def login(
     if employee.status != EmployeeStatus.active:
         raise ValueError("Employee account is disabled")
 
+    role = _legacy_token_role(employee)
     access_token, _ = create_access_token(
-        employee.username, employee.role.value, employee_id=str(employee.id)
+        employee.username, role, employee_id=str(employee.id)
     )
-    refresh_token, _ = create_refresh_token(employee.username, employee.role.value)
+    refresh_token, _ = create_refresh_token(employee.username, role)
 
     employee.last_login_at = datetime.now(timezone.utc).replace(tzinfo=None)
     await db.flush()
@@ -72,7 +79,11 @@ async def refresh_access_token(
     if not username:
         raise ValueError("Invalid refresh token")
 
-    result = await db.execute(select(Employee).where(Employee.username == username))
+    result = await db.execute(
+        select(Employee)
+        .options(selectinload(Employee.role_assignments))
+        .where(Employee.username == username)
+    )
     employee = result.scalar_one_or_none()
     if employee is None or employee.status != EmployeeStatus.active:
         raise ValueError("Employee account not found or disabled")
@@ -86,11 +97,21 @@ async def refresh_access_token(
         if ttl > 0:
             await redis.setex(f"token_blacklist:{jti}", ttl, "1")
 
+    role = _legacy_token_role(employee)
     access_token, _ = create_access_token(
-        employee.username, employee.role.value, employee_id=str(employee.id)
+        employee.username, role, employee_id=str(employee.id)
     )
-    refresh_token, _ = create_refresh_token(employee.username, employee.role.value)
+    refresh_token, _ = create_refresh_token(employee.username, role)
 
     return TokenResponse(
         access_token=access_token, refresh_token=refresh_token
     )
+
+
+def _legacy_token_role(employee: Employee) -> str:
+    roles = normalize_roles(employee.roles)
+    if not roles:
+        raise ValueError("Employee has no roles")
+    if EmployeeRole.admin in roles:
+        return EmployeeRole.admin.value
+    return roles[0].value

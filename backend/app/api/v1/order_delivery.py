@@ -6,8 +6,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.deps import AdminUser, CurrentUser
+from app.core.deps import AdminUser, CurrentUser, DeliveryUser
+from app.core.permissions import has_any_role
+from app.models.employee import EmployeeRole
 from app.schemas.common import ResponseBase
+from app.schemas.return_order import ReturnableOrderItemOut
 from app.schemas.order_delivery import (
     OrderDeliveryArchivePageOut,
     OrderDeliveryCurrentGroupOut,
@@ -18,6 +21,7 @@ from app.schemas.order_delivery import (
     OrderDeliverySignRequest,
 )
 from app.services import order_delivery_service
+from app.services.return_order_service import list_returnable_items
 
 router = APIRouter(prefix="/deliveries", tags=["配送管理"])
 
@@ -30,6 +34,28 @@ def _raise_service_error(error: PermissionError | ValueError) -> NoReturn:
     else:
         status_code = status.HTTP_400_BAD_REQUEST
     raise HTTPException(status_code=status_code, detail=str(error))
+
+
+@router.get(
+    "/{delivery_id}/returnable-items",
+    response_model=ResponseBase[list[ReturnableOrderItemOut]],
+)
+async def returnable_items(
+    delivery_id: UUID,
+    current_user: DeliveryUser,
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        return ResponseBase(
+            data=await list_returnable_items(
+                db,
+                str(delivery_id),
+                current_user.id,
+                is_admin=has_any_role(current_user, EmployeeRole.admin),
+            )
+        )
+    except (PermissionError, ValueError) as error:
+        _raise_service_error(error)
 
 
 @router.get(
@@ -159,7 +185,7 @@ async def reassign_delivery(
 async def create_delivery_exception(
     delivery_id: UUID,
     request: OrderDeliveryExceptionRequest,
-    current_user: CurrentUser,
+    current_user: DeliveryUser,
     db: AsyncSession = Depends(get_db),
 ):
     try:
@@ -182,7 +208,7 @@ async def create_delivery_exception(
 async def sign_delivery(
     delivery_id: UUID,
     request: OrderDeliverySignRequest,
-    current_user: CurrentUser,
+    current_user: DeliveryUser,
     db: AsyncSession = Depends(get_db),
 ):
     try:

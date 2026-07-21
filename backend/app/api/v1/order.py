@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.deps import CurrentUser
+from app.core.deps import CurrentUser, FinanceUser, WarehouseUser
 from app.models.order import OrderStatus
 from app.schemas.common import PaginatedResponse, ResponseBase
 from app.schemas.order import (
@@ -31,7 +31,7 @@ router = APIRouter(prefix="/orders", tags=["Order"])
 @router.post("", response_model=ResponseBase[OrderOut], status_code=status.HTTP_201_CREATED)
 async def create(
     req: OrderCreate,
-    current_user: CurrentUser = None,
+    current_user: WarehouseUser,
     db: AsyncSession = Depends(get_db),
 ):
     try:
@@ -92,7 +92,7 @@ async def shipping_options(
 async def start_shipping(
     order_id: str,
     req: OrderShipRequest,
-    current_user: CurrentUser = None,
+    current_user: WarehouseUser,
     db: AsyncSession = Depends(get_db),
 ):
     try:
@@ -109,7 +109,7 @@ async def start_shipping(
 async def adjust_shipping_allocations(
     order_id: str,
     req: OrderShipRequest,
-    current_user: CurrentUser = None,
+    current_user: WarehouseUser,
     db: AsyncSession = Depends(get_db),
 ):
     try:
@@ -124,7 +124,7 @@ async def adjust_shipping_allocations(
 async def stock_out(
     order_id: UUID,
     req: OrderStockOutRequest,
-    current_user: CurrentUser = None,
+    current_user: WarehouseUser,
     db: AsyncSession = Depends(get_db),
 ):
     try:
@@ -145,7 +145,7 @@ async def stock_out(
 async def complete(
     order_id: str,
     req: OrderCompleteRequest,
-    current_user: CurrentUser = None,
+    current_user: FinanceUser,
     db: AsyncSession = Depends(get_db),
 ):
     try:
@@ -162,7 +162,7 @@ async def complete(
 async def cancel(
     order_id: str,
     req: OrderActionRequest,
-    current_user: CurrentUser = None,
+    current_user: WarehouseUser,
     db: AsyncSession = Depends(get_db),
 ):
     try:

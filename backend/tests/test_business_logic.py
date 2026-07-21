@@ -21,7 +21,12 @@ from app.models.inventory import (
     Warehouse,
     WarehouseStatus,
 )
-from app.models.employee import Employee, EmployeeRole, EmployeeStatus
+from app.models.employee import (
+    Employee,
+    EmployeeRole,
+    EmployeeRoleAssignment,
+    EmployeeStatus,
+)
 from app.models.order import (
     Order,
     OrderInventoryAllocation,
@@ -1546,6 +1551,7 @@ def test_delivery_route_contract_and_authorization_dependencies():
         ("/api/v1/deliveries/archive", "GET"),
         ("/api/v1/deliveries/{delivery_id}", "GET"),
         ("/api/v1/deliveries/{delivery_id}/reassign", "PUT"),
+        ("/api/v1/deliveries/{delivery_id}/returnable-items", "GET"),
         ("/api/v1/deliveries/{delivery_id}/exceptions", "POST"),
         ("/api/v1/deliveries/{delivery_id}/sign", "PUT"),
     }
@@ -1560,7 +1566,11 @@ def test_delivery_route_contract_and_authorization_dependencies():
             if dependency.call is not None
         }
         expected_dependency = (
-            "require_admin" if path.endswith("/reassign") else "get_current_user"
+            "require_admin"
+            if path.endswith("/reassign")
+            else "require_delivery"
+            if path.endswith("/returnable-items") or path.endswith("/exceptions") or path.endswith("/sign")
+            else "get_current_user"
         )
         assert expected_dependency in dependency_names
 
@@ -1648,7 +1658,7 @@ async def test_stock_out_route_forwards_request_and_employee(monkeypatch):
         username="stock-user",
         name="出库员",
         password_hash="hash",
-        role=EmployeeRole.normal,
+        role_assignments=[EmployeeRoleAssignment(role=EmployeeRole.delivery)],
         status=EmployeeStatus.active,
     )
     request = OrderStockOutRequest(
@@ -1714,7 +1724,7 @@ async def test_delivery_api_delegates_queries_and_mutations(monkeypatch):
         username="delivery-user",
         name="配送员",
         password_hash="hash",
-        role=EmployeeRole.normal,
+        role_assignments=[EmployeeRoleAssignment(role=EmployeeRole.delivery)],
         status=EmployeeStatus.active,
     )
     admin = Employee(
@@ -1722,7 +1732,7 @@ async def test_delivery_api_delegates_queries_and_mutations(monkeypatch):
         username="admin",
         name="管理员",
         password_hash="hash",
-        role=EmployeeRole.admin,
+        role_assignments=[EmployeeRoleAssignment(role=EmployeeRole.admin)],
         status=EmployeeStatus.active,
     )
     delivery_id = uuid.uuid4()
@@ -2056,7 +2066,7 @@ def test_delivery_asgi_rejects_malformed_uuid_boundaries(
     from app.api.v1 import order_delivery as delivery_api
 
     user = _delivery_employee(
-        role=EmployeeRole.admin if as_admin else EmployeeRole.normal
+        role=EmployeeRole.admin if as_admin else EmployeeRole.delivery
     )
 
     async def unexpected(*args, **kwargs):
@@ -2078,16 +2088,21 @@ def test_delivery_asgi_rejects_malformed_uuid_boundaries(
         client.close()
         app.dependency_overrides.clear()
 
-    assert response.status_code == 422
-    assert response.json()["code"] == 422
-    assert response.json()["message"] == "请求参数校验失败"
-    assert response.json()["data"]
+    expected_status = 403 if path.startswith("/api/v1/orders/") else 422
+    assert response.status_code == expected_status
+    assert response.json()["code"] == expected_status
+    expected_message = "warehouse_manager access required" if expected_status == 403 else "请求参数校验失败"
+    assert response.json()["message"] == expected_message
+    if expected_status == 422:
+        assert response.json()["data"]
+    else:
+        assert response.json()["data"] is None
 
 
 def test_delivery_asgi_reassign_requires_admin(monkeypatch):
     from app.api.v1 import order_delivery as delivery_api
 
-    normal_user = _delivery_employee(role=EmployeeRole.normal)
+    normal_user = _delivery_employee(role=EmployeeRole.delivery)
 
     async def unexpected(*args, **kwargs):
         raise AssertionError("normal user must not reach reassignment service")
@@ -2124,14 +2139,14 @@ def test_delivery_asgi_reassign_requires_admin(monkeypatch):
                 "remark": "货物完好",
             },
             "sign_delivery",
-            EmployeeRole.normal,
+            EmployeeRole.delivery,
         ),
         (
             "POST",
             "exceptions",
             {"exception_type": "customer_absent", "remark": "客户不在"},
             "record_delivery_exception",
-            EmployeeRole.normal,
+            EmployeeRole.delivery,
         ),
         (
             "PUT",
@@ -2240,7 +2255,7 @@ async def test_delivery_api_maps_service_errors(
         username="delivery-user",
         name="配送员",
         password_hash="hash",
-        role=EmployeeRole.normal,
+        role_assignments=[EmployeeRoleAssignment(role=EmployeeRole.delivery)],
         status=EmployeeStatus.active,
     )
 
@@ -2600,7 +2615,7 @@ async def test_enable_employee_restores_active_status():
         username="disabled-user",
         password_hash="hash",
         name="已禁用员工",
-        role=EmployeeRole.normal,
+        role_assignments=[EmployeeRoleAssignment(role=EmployeeRole.delivery)],
         status=EmployeeStatus.disabled,
     )
     db = QueueDb([FakeResult(one=employee)])
@@ -3777,20 +3792,19 @@ def test_return_order_create_schema_validates_stock_in_warehouse_decision():
     from app.schemas.return_order import ReturnOrderCreate, ReturnOrderItemCreate
 
     common = {
-        "product_id": str(uuid.uuid4()),
+        "source_order_item_id": str(uuid.uuid4()),
         "quantity": 1,
-        "unit_price": Decimal("10.00"),
         "condition": "normal",
         "return_reason": "客户拒收",
     }
     with pytest.raises(ValidationError, match="入库仓库"):
         ReturnOrderCreate(
-            customer_id=str(uuid.uuid4()),
+            handling_delivery_id=str(uuid.uuid4()),
             items=[ReturnOrderItemCreate(**common, should_stock_in=True)],
         )
     with pytest.raises(ValidationError, match="不得保留仓库"):
         ReturnOrderCreate(
-            customer_id=str(uuid.uuid4()),
+            handling_delivery_id=str(uuid.uuid4()),
             items=[
                 ReturnOrderItemCreate(
                     **common,
@@ -3811,6 +3825,7 @@ def test_return_order_void_requires_non_blank_reason():
 @pytest.mark.asyncio
 async def test_create_return_order_stocks_selected_items_and_deducts_actual_customer_spend(monkeypatch):
     from app.models.return_order import ReturnOrder, ReturnOrderItem, ReturnOrderStatus
+    from app.models.order_delivery import OrderDelivery, OrderDeliveryStatus
     from app.schemas.return_order import ReturnOrderCreate, ReturnOrderItemCreate
     from app.services import return_order_service
 
@@ -3832,14 +3847,50 @@ async def test_create_return_order_stocks_selected_items_and_deducts_actual_cust
         id=uuid.uuid4(), name="过期商品", barcode="6900000000302",
         category_id=uuid.uuid4(), unit="件", standard_price=Decimal("40.00"), cost_price=Decimal("12.00"),
     )
+    operator_id = uuid.uuid4()
+    handling_order = Order(
+        id=uuid.uuid4(), order_no="ORD-HANDLING", customer_id=customer.id,
+        total_amount=Decimal("10.00"), returned_amount=Decimal("0.00"),
+        status=OrderStatus.stocked_out,
+    )
+    delivery = OrderDelivery(
+        id=uuid.uuid4(), order_id=handling_order.id,
+        delivery_employee_id=operator_id, delivery_employee_name="配送员",
+        status=OrderDeliveryStatus.delivering, recipient_name="收货人",
+        recipient_phone="13800000000", delivery_address="测试地址",
+        assigned_at=datetime.now(timezone.utc).replace(tzinfo=None),
+        assigned_by_id=uuid.uuid4(), assigned_by_name="管理员",
+    )
+    first_source_order = Order(
+        id=uuid.uuid4(), order_no="ORD-SOURCE-1", customer_id=customer.id,
+        total_amount=Decimal("60.00"), returned_amount=Decimal("0.00"),
+        status=OrderStatus.completed,
+    )
+    first_source_item = OrderItem(
+        id=uuid.uuid4(), order_id=first_source_order.id, product_id=first_product.id,
+        product_name=first_product.name, barcode=first_product.barcode, quantity=2,
+        unit_price=Decimal("30.00"), subtotal=Decimal("60.00"),
+    )
+    second_source_order = Order(
+        id=uuid.uuid4(), order_no="ORD-SOURCE-2", customer_id=customer.id,
+        total_amount=Decimal("40.00"), returned_amount=Decimal("0.00"),
+        status=OrderStatus.delivered_unpaid,
+    )
+    second_source_item = OrderItem(
+        id=uuid.uuid4(), order_id=second_source_order.id, product_id=second_product.id,
+        product_name=second_product.name, barcode=second_product.barcode, quantity=1,
+        unit_price=Decimal("40.00"), subtotal=Decimal("40.00"),
+    )
     warehouse = Warehouse(id=uuid.uuid4(), name="主仓", status=WarehouseStatus.active)
     inventory = Inventory(
         id=uuid.uuid4(), product_id=first_product.id, warehouse_id=warehouse.id,
         quantity=3, locked=0,
     )
     db = QueueDb([
+        FakeResult(one=(delivery, handling_order)),
         FakeResult(one=customer),
-        FakeResult(values=[first_product, second_product]),
+        FakeResult(values=[(first_source_item, first_source_order), (second_source_item, second_source_order)]),
+        FakeResult(values=[]),
         FakeResult(values=[warehouse.id]),
     ])
 
@@ -3861,20 +3912,21 @@ async def test_create_return_order_stocks_selected_items_and_deducts_actual_cust
     result = await return_order_service.create_return_order(
         db,
         ReturnOrderCreate(
-            customer_id=str(customer.id),
+            handling_delivery_id=str(delivery.id),
             items=[
                 ReturnOrderItemCreate(
-                    product_id=str(first_product.id), quantity=2, unit_price=30,
+                    source_order_item_id=str(first_source_item.id), quantity=2,
                     condition="normal", return_reason="客户多买",
                     should_stock_in=True, warehouse_id=str(warehouse.id),
                 ),
                 ReturnOrderItemCreate(
-                    product_id=str(second_product.id), quantity=1, unit_price=40,
+                    source_order_item_id=str(second_source_item.id), quantity=1,
                     condition="expired", return_reason="商品过期", should_stock_in=False,
                 ),
             ],
         ),
-        operator="return-user",
+        operator_id=operator_id,
+        operator_name="return-user",
     )
 
     assert isinstance(result, ReturnOrder)
@@ -3905,8 +3957,19 @@ async def test_void_return_order_reverses_inventory_and_only_restores_actual_ded
     )
     warehouse_id = uuid.uuid4()
     product_id = uuid.uuid4()
+    source_order = Order(
+        id=uuid.uuid4(), order_no="ORD-SOURCE", customer_id=customer.id,
+        total_amount=Decimal("100.00"), returned_amount=Decimal("60.00"),
+        status=OrderStatus.completed,
+    )
+    source_item = OrderItem(
+        id=uuid.uuid4(), order_id=source_order.id, product_id=product_id,
+        product_name="可入库商品", barcode="6900000000301", quantity=2,
+        unit_price=Decimal("30.00"), subtotal=Decimal("60.00"),
+    )
     return_order = ReturnOrder(
         id=uuid.uuid4(), return_no="RET1", customer_id=customer.id,
+        handling_delivery_id=uuid.uuid4(),
         total_amount=Decimal("100.00"), status=ReturnOrderStatus.completed,
         operator="return-user", completed_at=datetime.now(timezone.utc).replace(tzinfo=None),
         customer_spent_before=Decimal("50.00"), customer_spent_after=Decimal("0.00"),
@@ -3914,7 +3977,8 @@ async def test_void_return_order_reverses_inventory_and_only_restores_actual_ded
     )
     return_order.items = [
         ReturnOrderItem(
-            id=uuid.uuid4(), return_order_id=return_order.id, product_id=product_id,
+            id=uuid.uuid4(), return_order_id=return_order.id,
+            source_order_item_id=source_item.id, product_id=product_id,
             product_name="可入库商品", barcode="6900000000301", quantity=2,
             unit_price=Decimal("30.00"), subtotal=Decimal("60.00"),
             condition=ReturnProductCondition.normal, return_reason="客户多买",
@@ -3925,7 +3989,11 @@ async def test_void_return_order_reverses_inventory_and_only_restores_actual_ded
         id=uuid.uuid4(), product_id=product_id, warehouse_id=warehouse_id,
         quantity=5, locked=1,
     )
-    db = QueueDb([FakeResult(one=return_order), FakeResult(one=customer)])
+    db = QueueDb([
+        FakeResult(one=return_order),
+        FakeResult(one=customer),
+        FakeResult(values=[(source_item, source_order)]),
+    ])
 
     async def fixed_movement_no(_db, _prefix):
         return "CRV20260719000001"
@@ -3964,8 +4032,19 @@ async def test_void_return_order_rejects_inventory_that_would_consume_locked_sto
     )
     warehouse_id = uuid.uuid4()
     product_id = uuid.uuid4()
+    source_order = Order(
+        id=uuid.uuid4(), order_no="ORD-SOURCE", customer_id=customer.id,
+        total_amount=Decimal("60.00"), returned_amount=Decimal("60.00"),
+        status=OrderStatus.completed,
+    )
+    source_item = OrderItem(
+        id=uuid.uuid4(), order_id=source_order.id, product_id=product_id,
+        product_name="可入库商品", barcode="6900000000301", quantity=2,
+        unit_price=Decimal("30.00"), subtotal=Decimal("60.00"),
+    )
     return_order = ReturnOrder(
         id=uuid.uuid4(), return_no="RET1", customer_id=customer.id,
+        handling_delivery_id=uuid.uuid4(),
         total_amount=Decimal("60.00"), status=ReturnOrderStatus.completed,
         operator="return-user", completed_at=datetime.now(timezone.utc).replace(tzinfo=None),
         customer_spent_before=Decimal("50.00"), customer_spent_after=Decimal("0.00"),
@@ -3973,7 +4052,8 @@ async def test_void_return_order_rejects_inventory_that_would_consume_locked_sto
     )
     return_order.items = [
         ReturnOrderItem(
-            id=uuid.uuid4(), return_order_id=return_order.id, product_id=product_id,
+            id=uuid.uuid4(), return_order_id=return_order.id,
+            source_order_item_id=source_item.id, product_id=product_id,
             product_name="可入库商品", barcode="6900000000301", quantity=2,
             unit_price=Decimal("30.00"), subtotal=Decimal("60.00"),
             condition=ReturnProductCondition.normal, return_reason="客户多买",
@@ -3984,7 +4064,11 @@ async def test_void_return_order_rejects_inventory_that_would_consume_locked_sto
         id=uuid.uuid4(), product_id=product_id, warehouse_id=warehouse_id,
         quantity=5, locked=4,
     )
-    db = QueueDb([FakeResult(one=return_order), FakeResult(one=customer)])
+    db = QueueDb([
+        FakeResult(one=return_order),
+        FakeResult(one=customer),
+        FakeResult(values=[(source_item, source_order)]),
+    ])
 
     async def get_inventory(_db, _product_id, _warehouse_id):
         return inventory
@@ -4018,7 +4102,12 @@ def test_return_order_routes_and_auth_contract():
             for dependency in route.dependant.dependencies
             if dependency.call is not None
         }
-        assert "get_current_user" in dependency_names
+        if route.path == "/api/v1/return-orders" and "POST" in route.methods:
+            assert "require_delivery" in dependency_names
+        elif route.path.endswith("/void"):
+            assert "require_admin" in dependency_names
+        else:
+            assert "get_current_user" in dependency_names
 
 
 @pytest.mark.asyncio
@@ -4169,13 +4258,13 @@ def test_order_shipping_options_route_is_available():
     assert ("/api/v1/orders/{order_id}/shipping-options", ("GET",)) in routes
 
 
-def _delivery_employee(*, role=EmployeeRole.normal, status=EmployeeStatus.active, name="配送员"):
+def _delivery_employee(*, role=EmployeeRole.delivery, status=EmployeeStatus.active, name="配送员"):
     return Employee(
         id=uuid.uuid4(),
         username=f"employee-{uuid.uuid4().hex[:8]}",
         password_hash="hashed",
         name=name,
-        role=role,
+        role_assignments=[EmployeeRoleAssignment(role=role)],
         status=status,
     )
 
@@ -4962,3 +5051,26 @@ async def test_refresh_uses_current_employee_claims_for_legacy_refresh_token():
     assert access_claims["role"] == "admin"
     assert access_claims["employee_id"] == str(employee.id)
     assert "employee_id" not in refresh_claims
+
+@pytest.mark.asyncio
+async def test_complete_order_rejects_payment_above_net_amount_after_returns():
+    customer = Customer(
+        id=uuid.uuid4(), name="客户", contact_name="联系人", contact_phone="13800000000", level_id=uuid.uuid4()
+    )
+    order = Order(
+        id=uuid.uuid4(), order_no="ORD-NET", customer_id=customer.id,
+        total_amount=Decimal("100.00"), returned_amount=Decimal("40.00"),
+        status=OrderStatus.delivered_unpaid,
+    )
+    db = QueueDb([FakeResult(one=order)])
+
+    with pytest.raises(ValueError, match="实收金额不能超过订单应收金额"):
+        await order_service.transition_order(
+            db,
+            str(order.id),
+            OrderStatus.completed,
+            "finance-user",
+            complete_request=OrderCompleteRequest(
+                paid_amount="60.01", payment_proof_image_urls=["https://example.com/payment.jpg"]
+            ),
+        )

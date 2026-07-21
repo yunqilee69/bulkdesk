@@ -5,7 +5,7 @@ import {
   ProFormText,
   ProFormSelect,
 } from '@ant-design/pro-components';
-import { Button, message, Popconfirm } from 'antd';
+import { Button, message, Popconfirm, Tag } from 'antd';
 import { useAccess } from '@umijs/max';
 import {
   listEmployees,
@@ -17,15 +17,30 @@ import {
 } from '@/services/employee';
 import React, { useRef } from 'react';
 import type { ActionType, ProColumns } from '@ant-design/pro-components';
+import { normalizeEmployeeRoles, roleColors, roleLabels, roleOptions } from './roles';
 
 interface EmployeeRecord {
   id: string;
   username: string;
   name: string;
   phone: string;
-  role: string;
+  roles: API.EmployeeRole[];
   status: string;
   last_login_at: string;
+}
+
+interface EmployeeCreateFormValues {
+  username: string;
+  password: string;
+  name: string;
+  phone?: string;
+  roles?: API.EmployeeRole[];
+}
+
+interface EmployeeEditFormValues {
+  name: string;
+  phone?: string;
+  roles?: API.EmployeeRole[];
 }
 
 const Employee: React.FC = () => {
@@ -53,10 +68,16 @@ const Employee: React.FC = () => {
     },
     {
       title: '角色',
-      dataIndex: 'role',
-      valueEnum: {
-        admin: { text: '管理员', status: 'Processing' },
-        normal: { text: '普通员工', status: 'Default' },
+      dataIndex: 'roles',
+      search: false,
+      render: (_, record) => {
+        const roles = normalizeEmployeeRoles(record.roles);
+        if (roles.length === 0) return '-';
+        return roles.map((role) => (
+          <Tag key={role} color={roleColors[role]}>
+            {roleLabels[role]}
+          </Tag>
+        ));
       },
     },
     {
@@ -177,13 +198,14 @@ const Employee: React.FC = () => {
         open={createModalOpen}
         onOpenChange={handleCreateModalOpen}
         modalProps={{ destroyOnHidden: true }}
-        onFinish={async (values: Record<string, string>) => {
+        onFinish={async (values: EmployeeCreateFormValues) => {
+          const roles = normalizeEmployeeRoles(values.roles);
           const res = await createEmployee({
             username: values.username,
             password: values.password,
             name: values.name,
             phone: values.phone,
-            role: values.role,
+            roles,
           });
           if (res.code === 0) {
             message.success('创建成功');
@@ -211,13 +233,11 @@ const Employee: React.FC = () => {
         />
         <ProFormText name="phone" label="手机号" />
         <ProFormSelect
-          name="role"
+          name="roles"
           label="角色"
-          rules={[{ required: true, message: '请选择角色' }]}
-          options={[
-            { label: '管理员', value: 'admin' },
-            { label: '普通员工', value: 'normal' },
-          ]}
+          mode="multiple"
+          rules={[{ required: true, message: '请至少选择一个角色' }]}
+          options={roleOptions}
         />
       </ModalForm>
 
@@ -226,13 +246,14 @@ const Employee: React.FC = () => {
         open={editModalOpen}
         onOpenChange={handleEditModalOpen}
         modalProps={{ destroyOnHidden: true }}
-        initialValues={currentRow}
-        onFinish={async (values: Record<string, string>) => {
+        initialValues={currentRow ? { ...currentRow, roles: normalizeEmployeeRoles(currentRow.roles) } : undefined}
+        onFinish={async (values: EmployeeEditFormValues) => {
           if (!currentRow) return false;
+          const roles = normalizeEmployeeRoles(values.roles);
           const res = await updateEmployee(currentRow.id, {
             name: values.name,
             phone: values.phone,
-            role: values.role,
+            roles,
           });
           if (res.code === 0) {
             message.success('更新成功');
@@ -250,13 +271,11 @@ const Employee: React.FC = () => {
         />
         <ProFormText name="phone" label="手机号" />
         <ProFormSelect
-          name="role"
+          name="roles"
           label="角色"
-          rules={[{ required: true, message: '请选择角色' }]}
-          options={[
-            { label: '管理员', value: 'admin' },
-            { label: '普通员工', value: 'normal' },
-          ]}
+          mode="multiple"
+          rules={[{ required: true, message: '请至少选择一个角色' }]}
+          options={roleOptions}
         />
       </ModalForm>
 

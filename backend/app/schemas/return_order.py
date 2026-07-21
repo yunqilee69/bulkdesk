@@ -8,9 +8,8 @@ from app.schemas.common import ApiSchema
 
 
 class ReturnOrderItemCreate(ApiSchema):
-    product_id: str
+    source_order_item_id: str
     quantity: int = Field(..., gt=0)
-    unit_price: float = Field(..., gt=0)
     condition: ReturnProductCondition = ReturnProductCondition.normal
     return_reason: str = Field(..., min_length=1, max_length=255)
     remark: Optional[str] = None
@@ -35,16 +34,34 @@ class ReturnOrderItemCreate(ApiSchema):
 
 
 class ReturnOrderCreate(ApiSchema):
-    customer_id: str
+    handling_delivery_id: str
     items: List[ReturnOrderItemCreate] = Field(..., min_length=1)
     remark: Optional[str] = None
 
     @model_validator(mode="after")
-    def reject_duplicate_products(self):
-        product_ids = [item.product_id for item in self.items]
-        if len(product_ids) != len(set(product_ids)):
-            raise ValueError("同一商品不能重复添加")
+    def reject_duplicate_source_items(self):
+        source_order_item_ids = [item.source_order_item_id for item in self.items]
+        if len(source_order_item_ids) != len(set(source_order_item_ids)):
+            raise ValueError("同一来源订单明细不能重复添加")
         return self
+
+
+class ReturnableOrderItemOut(ApiSchema):
+    source_order_item_id: str
+    order_id: str
+    order_no: str
+    product_id: str
+    product_name: str
+    barcode: str
+    unit_price: float
+    sold_quantity: int
+    returned_quantity: int
+    returnable_quantity: int
+
+    @field_validator("source_order_item_id", "order_id", "product_id", mode="before")
+    @classmethod
+    def uuid_to_str(cls, value):
+        return str(value)
 
 
 class ReturnOrderVoidRequest(ApiSchema):
@@ -62,6 +79,7 @@ class ReturnOrderVoidRequest(ApiSchema):
 class ReturnOrderItemOut(ApiSchema):
     id: str
     return_order_id: str
+    source_order_item_id: str
     product_id: str
     product_name: str
     barcode: str
@@ -77,7 +95,14 @@ class ReturnOrderItemOut(ApiSchema):
 
     model_config = {"from_attributes": True}
 
-    @field_validator("id", "return_order_id", "product_id", "warehouse_id", mode="before")
+    @field_validator(
+        "id",
+        "return_order_id",
+        "source_order_item_id",
+        "product_id",
+        "warehouse_id",
+        mode="before",
+    )
     @classmethod
     def uuid_to_str(cls, value):
         return str(value) if value is not None else None
@@ -87,6 +112,7 @@ class ReturnOrderOut(ApiSchema):
     id: str
     return_no: str
     customer_id: str
+    handling_delivery_id: str
     customer_name: Optional[str] = None
     total_amount: float
     status: ReturnOrderStatus
@@ -107,7 +133,7 @@ class ReturnOrderOut(ApiSchema):
 
     model_config = {"from_attributes": True}
 
-    @field_validator("id", "customer_id", mode="before")
+    @field_validator("id", "customer_id", "handling_delivery_id", mode="before")
     @classmethod
     def uuid_to_str(cls, value):
         return str(value)
