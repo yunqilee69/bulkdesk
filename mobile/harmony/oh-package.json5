@@ -1,0 +1,19 @@
+{
+  "name": "bulkdesk-mobile-poc",
+  "description": "BulkDesk React Native Harmony POC",
+  "version": "1.0.0",
+  "modelVersion": "5.0.0",
+  "license": "UNLICENSED",
+  "repository": {},
+  "dependencies": {
+    "@rnoh/react-native-openharmony": "file:../node_modules/@react-native-oh/react-native-harmony/react_native_openharmony.har",
+  },
+  "devDependencies": {
+    "@ohos/hypium": "1.0.6",
+  },
+  "overrides": {
+    "@rnoh/react-native-openharmony": "file:../node_modules/@react-native-oh/react-native-harmony/react_native_openharmony.har",
+  },
+}
+
+

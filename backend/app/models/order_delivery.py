@@ -95,6 +95,9 @@ class OrderDelivery(UUIDMixin, TimestampMixin, Base):
     assigned_by_name: Mapped[str] = mapped_column(String(100), nullable=False)
     signer_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     proof_image_urls: Mapped[Optional[list[str]]] = mapped_column(JSON, nullable=True)
+    signature_image_url: Mapped[Optional[str]] = mapped_column(
+        String(1000), nullable=True
+    )
     sign_remark: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     signed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     signed_by_id: Mapped[Optional[uuid.UUID]] = mapped_column(

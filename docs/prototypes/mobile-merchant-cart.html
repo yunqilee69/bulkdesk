@@ -1,0 +1,528 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>BulkDesk 商家端购物车示意图</title>
+    <style>
+      :root {
+        --red: #f3313f;
+        --orange: #ff7a22;
+        --orange-dark: #f05d1e;
+        --green: #35a853;
+        --ink: #151927;
+        --muted: #818899;
+        --line: #eef0f5;
+        --bg: #f7f8fb;
+        --card: #ffffff;
+        --shadow: 0 16px 34px rgba(22, 25, 39, 0.08);
+      }
+
+      * { box-sizing: border-box; }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background:
+          radial-gradient(circle at 12% 8%, rgba(243, 49, 63, 0.1), transparent 28%),
+          radial-gradient(circle at 84% 18%, rgba(255, 122, 34, 0.12), transparent 26%),
+          linear-gradient(135deg, #fafafa 0%, #eef3fa 100%);
+        color: var(--ink);
+        font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
+      }
+
+      .stage { width: min(100vw, 460px); padding: 22px 10px; }
+
+      .phone {
+        width: 430px;
+        height: 932px;
+        max-width: calc(100vw - 20px);
+        margin: 0 auto;
+        overflow: hidden;
+        border: 10px solid #11131a;
+        border-radius: 46px;
+        background: var(--bg);
+        box-shadow: 0 28px 80px rgba(17, 19, 26, 0.22);
+      }
+
+      .screen {
+        position: relative;
+        height: 100%;
+        overflow: hidden;
+        border-radius: 34px;
+        background: var(--bg);
+      }
+
+      .status-bar {
+        height: 38px;
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        padding: 0 22px 5px;
+        background: #fff;
+        font-size: 13px;
+        font-weight: 850;
+      }
+
+      .status-icons { display: flex; align-items: center; gap: 7px; font-size: 12px; }
+      .battery { min-width: 25px; padding: 1px 5px; border-radius: 7px; background: #333842; color: #fff; font-size: 11px; }
+
+      .content {
+        height: calc(100% - 38px - 75px);
+        overflow-y: auto;
+        padding-bottom: 104px;
+        scrollbar-width: none;
+      }
+      .content::-webkit-scrollbar { display: none; }
+
+      .top {
+        position: sticky;
+        top: 0;
+        z-index: 5;
+        padding: 12px 12px 10px;
+        background: rgba(255, 255, 255, 0.97);
+        border-bottom: 1px solid rgba(238, 240, 245, 0.95);
+        backdrop-filter: blur(16px);
+      }
+
+      .title-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+      }
+
+      .cart-title {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        white-space: nowrap;
+      }
+
+      .cart-title strong { font-size: 24px; font-weight: 950; letter-spacing: -0.7px; }
+      .cart-title span { color: #4f5667; font-size: 16px; font-weight: 800; }
+
+      .mode-chip {
+        padding: 4px 8px;
+        border-radius: 999px;
+        background: #fff0ec;
+        color: var(--orange-dark);
+        font-size: 11px;
+        font-weight: 900;
+      }
+
+      .right-actions {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        color: #171b28;
+        font-size: 15px;
+        font-weight: 900;
+      }
+
+      .icon-btn {
+        width: 34px;
+        height: 34px;
+        display: grid;
+        place-items: center;
+        border: 0;
+        border-radius: 13px;
+        background: #f4f5f8;
+        color: var(--ink);
+        font-size: 24px;
+        font-weight: 600;
+      }
+
+      .customer-tabs {
+        display: flex;
+        gap: 8px;
+        overflow-x: auto;
+        padding: 13px 0 0;
+        scrollbar-width: none;
+      }
+      .customer-tabs::-webkit-scrollbar { display: none; }
+
+      .customer-tab {
+        flex: 0 0 auto;
+        min-width: 72px;
+        max-width: 118px;
+        overflow: hidden;
+        padding: 8px 12px;
+        border-radius: 999px;
+        background: #f3f4f7;
+        color: #575e70;
+        font-size: 13px;
+        font-weight: 850;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .customer-tab::after {
+        content: "长按删除";
+        display: none;
+        margin-left: 6px;
+        font-size: 9px;
+        font-weight: 900;
+        opacity: 0.72;
+      }
+
+      .customer-tab.active::after {
+        display: inline;
+      }
+
+      .customer-tab.active {
+        background: linear-gradient(135deg, var(--orange), #ff9b3d);
+        color: #fff;
+        box-shadow: 0 10px 22px rgba(255, 122, 34, 0.24);
+      }
+
+      .group {
+        margin: 0 0 10px;
+        background: #fff;
+        border-top: 1px solid var(--line);
+        border-bottom: 1px solid var(--line);
+      }
+
+      .customer-header {
+        display: grid;
+        grid-template-columns: 34px 1fr auto;
+        align-items: center;
+        gap: 8px;
+        padding: 13px 12px 8px;
+      }
+
+      .check {
+        width: 25px;
+        height: 25px;
+        border: 3px solid #d7dce5;
+        border-radius: 50%;
+        background: #fff;
+      }
+      .check.on { border-color: var(--orange); background: radial-gradient(circle, var(--orange) 0 48%, #fff 51%); }
+
+      .brand-header-name {
+        overflow: hidden;
+        color: #161b29;
+        font-size: 18px;
+        font-weight: 950;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .brand-header-name b { color: var(--green); margin-right: 4px; }
+      .brand-status { color: #8a91a1; font-size: 12px; font-weight: 750; }
+      .brand-action { color: var(--orange-dark); font-size: 13px; font-weight: 900; }
+
+      .cart-item {
+        position: relative;
+        display: grid;
+        grid-template-columns: 34px 108px minmax(0, 1fr) 48px;
+        gap: 10px;
+        align-items: start;
+        padding: 12px;
+        overflow: hidden;
+      }
+
+      .cart-item.swiped {
+        padding-right: 76px;
+      }
+
+      .swipe-delete {
+        position: absolute;
+        top: 12px;
+        right: 12px;
+        bottom: 12px;
+        width: 56px;
+        display: grid;
+        place-items: center;
+        border-radius: 13px;
+        background: var(--red);
+        color: #fff;
+        font-size: 14px;
+        font-weight: 950;
+      }
+
+      .thumb {
+        width: 108px;
+        height: 108px;
+        display: grid;
+        place-items: center;
+        overflow: hidden;
+        border-radius: 13px;
+        background: #f7f8fa;
+      }
+
+      .mock {
+        position: relative;
+        width: 78%;
+        height: 72%;
+        filter: drop-shadow(0 12px 14px rgba(22, 25, 39, 0.12));
+      }
+      .orange { border-radius: 50%; background: radial-gradient(circle at 55% 38%, #ffe58b 0 18%, #f4aa2c 19% 45%, #83b948 46% 100%); }
+      .orange::before { content: ""; position: absolute; left: 28%; top: 0; width: 45%; height: 45%; border-radius: 50%; background: radial-gradient(circle, #ffe68a, #f6a92a); border: 3px solid #fff1bc; }
+      .toothpaste { width: 88%; height: 72%; border-radius: 14px; background: linear-gradient(180deg, #ffecef, #fff 45%, #69a4ff 46% 100%); }
+      .toothpaste::before, .toothpaste::after { content: ""; position: absolute; top: 15px; width: 22px; height: 58px; border-radius: 8px; background: linear-gradient(#fff, #ffd6c9); border: 1px solid #f1c2b7; }
+      .toothpaste::before { left: 22px; } .toothpaste::after { right: 24px; background: linear-gradient(#fff, #d8f2ff); }
+      .catfood { border-radius: 12px; background: linear-gradient(135deg, #fff, #f7f0e5); }
+      .catfood::after { content: "8种口味"; position: absolute; left: 16px; top: 28px; color: #d98626; font-size: 18px; font-weight: 1000; }
+      .hotpot { border-radius: 13px; background: linear-gradient(135deg, #fff, #eaf8e9); }
+      .hotpot::after { content: "补货中"; position: absolute; left: 12px; bottom: 8px; padding: 4px 10px; border-radius: 8px; background: #222936; color: #fff; font-size: 14px; font-weight: 950; }
+      .cola { border-radius: 9px; background: linear-gradient(90deg, #d72632 0 70%, #f7f7f7 71% 82%, #c91422 83%); }
+      .cola::after { content: "可乐"; position: absolute; left: 18px; top: 34px; color: #fff; font-size: 20px; font-weight: 1000; transform: skew(-10deg); }
+
+      .item-main {
+        min-width: 0;
+        padding-top: 1px;
+      }
+
+      .item-title {
+        overflow: hidden;
+        color: #151927;
+        font-size: 16px;
+        font-weight: 850;
+        line-height: 1.35;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .item-desc {
+        overflow: hidden;
+        margin-top: 7px;
+        color: #8b92a2;
+        font-size: 13px;
+        font-weight: 650;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .price-row {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 10px;
+        margin-top: 14px;
+      }
+
+      .price { color: var(--red); font-size: 24px; font-weight: 1000; letter-spacing: -0.8px; }
+
+      .original-price {
+        margin-left: 5px;
+        color: #9aa1b1;
+        font-size: 13px;
+        font-weight: 750;
+        text-decoration: line-through;
+      }
+
+      .qty {
+        align-self: start;
+        height: 34px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 10px;
+        background: #f3f4f7;
+        color: #151927;
+        font-size: 15px;
+        font-weight: 900;
+      }
+      .detail {
+        flex: 0 0 auto;
+        color: var(--red);
+        font-size: 14px;
+        font-weight: 900;
+        text-align: right;
+      }
+      .disabled-note { margin-top: 14px; color: #8e95a5; font-size: 14px; font-weight: 700; }
+      .find-same { color: var(--orange-dark); font-size: 14px; font-weight: 900; text-align: right; }
+
+      .checkout {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 75px;
+        z-index: 8;
+        height: 70px;
+        display: grid;
+        grid-template-columns: 92px 1fr 150px;
+        align-items: center;
+        gap: 8px;
+        padding: 9px 12px;
+        border-top: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.98);
+        backdrop-filter: blur(16px);
+      }
+      .select-all { display: flex; align-items: center; gap: 8px; color: #7d8494; font-size: 14px; font-weight: 850; }
+      .total { text-align: right; color: #151927; font-size: 15px; font-weight: 800; }
+      .total b { color: var(--orange-dark); font-size: 25px; font-weight: 1000; }
+      .settle { height: 51px; border: 0; border-radius: 15px; background: linear-gradient(135deg, var(--orange), #ff6427); color: #fff; font-size: 21px; font-weight: 1000; box-shadow: 0 10px 22px rgba(255, 122, 34, 0.24); }
+
+      .bottom-nav {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 10;
+        height: 75px;
+        display: grid;
+        grid-template-columns: repeat(5, 1fr);
+        align-items: center;
+        padding: 6px 8px 8px;
+        border-top: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.98);
+        backdrop-filter: blur(18px);
+      }
+      .nav-item { position: relative; display: grid; justify-items: center; gap: 2px; color: #20242d; font-size: 12px; font-weight: 760; }
+      .nav-item.active { color: var(--orange-dark); }
+      .nav-icon { width: 29px; height: 29px; display: grid; place-items: center; border-radius: 12px; font-size: 23px; }
+      .active .nav-icon { background: var(--orange); color: #fff; box-shadow: 0 9px 18px rgba(255, 122, 34, 0.24); }
+      .merchant-only { position: absolute; top: -6px; right: 10px; padding: 1px 4px; border-radius: 99px; background: #fff1d8; color: #bd6800; font-size: 9px; font-weight: 1000; }
+      .cart-count { position: absolute; top: -2px; right: 20px; min-width: 17px; height: 17px; display: grid; place-items: center; border-radius: 999px; background: var(--red); color: #fff; font-size: 10px; font-weight: 1000; }
+
+      .dev-label { margin: 12px auto 0; width: min(430px, calc(100vw - 20px)); color: #697081; font-size: 12px; line-height: 1.6; }
+
+      @media (max-width: 440px) {
+        .stage { padding: 0; }
+        .phone { width: 100vw; height: 100vh; max-width: none; border: 0; border-radius: 0; box-shadow: none; }
+        .screen { border-radius: 0; }
+        .dev-label { display: none; }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="stage" aria-label="商家模式购物车示意图">
+      <section class="phone">
+        <div class="screen">
+          <header class="status-bar" aria-hidden="true">
+            <span>19:50</span>
+            <span class="status-icons">5G ▮▮▮ Wi‑Fi <span class="battery">64</span></span>
+          </header>
+
+          <section class="content">
+            <div class="top">
+              <div class="title-row">
+                <div class="cart-title"><strong>购物车</strong><span>(68)</span><em class="mode-chip">商家模式</em></div>
+                <div class="right-actions">
+                  <span>客户</span>
+                  <button class="icon-btn" aria-label="新增客户购物车">＋</button>
+                </div>
+              </div>
+              <nav class="customer-tabs" aria-label="客户购物车切换">
+                <span class="customer-tab active">天猫超市</span>
+                <span class="customer-tab">海淀批发部</span>
+                <span class="customer-tab">朝阳便利店</span>
+                <span class="customer-tab">新客户</span>
+              </nav>
+            </div>
+
+            <section class="group" aria-label="生鲜品牌购物车">
+              <article class="cart-item" aria-label="商品详情入口">
+                <span class="check"></span>
+                <div class="thumb"><div class="mock orange"></div></div>
+                <div class="item-main">
+                  <div class="item-title">好鲜市集 秭归夏橙酸甜可口</div>
+                  <div class="item-desc">净重3斤装｜单果60-65mm｜小果</div>
+                <div class="price-row"><span><span class="price">¥16.68</span><span class="original-price">¥22.90</span></span><span class="detail">详情 ›</span></div>
+                </div>
+                <div class="qty">×1</div>
+              </article>
+
+              <article class="cart-item swiped" aria-label="商品详情入口，左滑后显示删除">
+                <span class="check"></span>
+                <div class="thumb" style="background:#fff0f2"><div class="mock toothpaste"></div></div>
+                <div class="item-main">
+                  <div class="item-title">舒客专效防蛀美白去黄</div>
+                  <div class="item-desc">专效牙膏1支 ›</div>
+                  <div class="price-row"><span><span class="price">¥38.34</span><span class="original-price">¥79.90</span></span><span class="detail">详情 ›</span></div>
+                </div>
+                <div class="qty">×1</div>
+                <div class="swipe-delete">删除</div>
+              </article>
+            </section>
+
+            <section class="group" aria-label="舒客品牌购物车">
+              <div class="customer-header">
+                <span class="check"></span>
+                <div>
+                  <div class="brand-header-name"><b>品牌</b>舒客 Saky ›</div>
+                  <div class="brand-status">同品牌商品分组，便于批量选择和结算</div>
+                </div>
+                <span class="brand-action">品牌优惠 ›</span>
+              </div>
+
+              <article class="cart-item" aria-label="商品详情入口">
+                <span class="check"></span>
+                <div class="thumb" style="background:#fff0f2"><div class="mock toothpaste"></div></div>
+                <div class="item-main">
+                  <div class="item-title">舒客专效防蛀美白去黄</div>
+                  <div class="item-desc">专效牙膏1支 ›</div>
+                  <div class="price-row"><span><span class="price">¥38.34</span><span class="original-price">¥79.90</span></span><span class="detail">详情 ›</span></div>
+                </div>
+                <div class="qty">×1</div>
+              </article>
+            </section>
+
+            <section class="group" aria-label="诚实一口品牌购物车">
+              <div class="customer-header">
+                <span class="check"></span>
+                <div>
+                  <div class="brand-header-name"><b>品牌</b>诚实一口 ›</div>
+                  <div class="brand-status">当前客户：海淀批发部</div>
+                </div>
+                <span class="brand-action">常购清单 ›</span>
+              </div>
+
+              <article class="cart-item" aria-label="商品详情入口">
+                <span class="check"></span>
+                <div class="thumb"><div class="mock catfood"></div></div>
+                <div class="item-main">
+                  <div class="item-title">诚实一口 猫条猫咪零食</div>
+                  <div class="item-desc">混合口味｜囤货装｜8包[40支] ›</div>
+                  <div class="price-row"><span><span class="price">¥49.28</span><span class="original-price">¥62.90</span></span><span class="detail">详情 ›</span></div>
+                </div>
+                <div class="qty">×1</div>
+              </article>
+
+              <article class="cart-item" aria-label="商品详情入口">
+                <span class="check"></span>
+                <div class="thumb"><div class="mock hotpot"></div></div>
+                <div class="item-main">
+                  <div class="item-title">安井火锅套餐肥牛卷虾滑丸子酥肉</div>
+                  <div class="item-desc">抱歉，我们正在补货中</div>
+                  <div class="disabled-note">不可购买</div>
+                </div>
+                <div class="find-same">找同款 ›</div>
+              </article>
+
+              <article class="cart-item" aria-label="商品详情入口">
+                <span class="check on"></span>
+                <div class="thumb"><div class="mock cola"></div></div>
+                <div class="item-main">
+                  <div class="item-title">可口可乐原味汽水畅爽</div>
+                  <div class="item-desc">1件｜330ml×24罐 ›</div>
+                  <div class="price-row"><span><span class="price">¥58.00</span><span class="original-price">¥69.00</span></span><span class="detail">详情 ›</span></div>
+                </div>
+                <div class="qty">×2</div>
+              </article>
+            </section>
+          </section>
+
+          <footer class="checkout" aria-label="结算栏">
+            <div class="select-all"><span class="check"></span><span>全选</span></div>
+            <div class="total">合计：<b>¥116.00</b></div>
+            <button class="settle">结算(2种)</button>
+          </footer>
+
+          <nav class="bottom-nav" aria-label="底部菜单">
+            <a class="nav-item"><span class="nav-icon">⌂</span><span>商品</span></a>
+            <a class="nav-item"><span class="merchant-only">商家</span><span class="nav-icon">▦</span><span>库存</span></a>
+            <a class="nav-item"><span class="merchant-only">商家</span><span class="nav-icon">⛟</span><span>派送</span></a>
+            <a class="nav-item active"><span class="cart-count">68</span><span class="nav-icon">🛒</span><span>购物车</span></a>
+            <a class="nav-item"><span class="nav-icon">♙</span><span>我的</span></a>
+          </nav>
+        </div>
+      </section>
+
+      <p class="dev-label">静态 HTML 示意图：客户 Tab 支持长按删除；商品支持左滑删除；会员价旁展示灰色原价；底部结算显示当前选择商品种数。</p>
+    </main>
+  </body>
+</html>

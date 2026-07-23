@@ -84,6 +84,7 @@ export interface OrderDeliveryArchiveRecord extends OrderDeliverySummary {
   total_amount: number;
   product_quantity: number;
   proof_image_urls: string[];
+  signature_image_url?: string | null;
   sign_remark?: string | null;
 }
 
@@ -106,6 +107,7 @@ export interface OrderDeliveryDetail extends OrderDeliverySummary {
   assigned_by_id: string;
   assigned_by_name: string;
   proof_image_urls: string[];
+  signature_image_url?: string | null;
   sign_remark?: string | null;
   signed_by_id?: string | null;
   signed_by_name?: string | null;
@@ -146,6 +148,7 @@ export interface OrderDeliveryExceptionRequest {
 export interface OrderDeliverySignInput {
   signer_name: string;
   proof_image_urls?: string[];
+  signature_image_url?: string | null;
   remark?: string;
   collect_payment?: boolean;
   paid_amount?: number;

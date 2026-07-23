@@ -4,6 +4,7 @@
 CLAUDE.md
 GEMINI.md
 .sisyphus/
+.superpowers/
 
 # === Python (backend) ===
 __pycache__/

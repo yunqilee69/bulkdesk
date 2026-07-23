@@ -429,6 +429,7 @@ async def list_delivery_archive(
                 OrderDelivery.signer_name.label("signer_name"),
                 OrderDelivery.signed_at.label("signed_at"),
                 OrderDelivery.proof_image_urls.label("proof_image_urls"),
+                OrderDelivery.signature_image_url.label("signature_image_url"),
                 OrderDelivery.sign_remark.label("sign_remark"),
                 Order.id.label("order_id"),
                 Order.order_no.label("order_no"),
@@ -594,6 +595,7 @@ async def sign_delivery(
     signed_at = _utc_now()
     delivery.signer_name = request.signer_name
     delivery.proof_image_urls = request.proof_image_urls
+    delivery.signature_image_url = request.signature_image_url
     delivery.sign_remark = request.remark
     delivery.signed_at = signed_at
     delivery.signed_by_id = current_user.id

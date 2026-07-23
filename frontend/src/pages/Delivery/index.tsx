@@ -627,7 +627,14 @@ const DeliveryPage = () => {
             <Descriptions.Item label="收货信息" span={2}>{detail.recipient_name} {detail.recipient_phone}，{detail.delivery_address}</Descriptions.Item>
             <Descriptions.Item label="签收备注" span={2}>{detail.sign_remark || '-'}</Descriptions.Item>
           </Descriptions>
-          <Card size="small" title="签收凭证" style={{ marginTop: 16 }}>{detail.proof_image_urls.length ? <Image.PreviewGroup>{detail.proof_image_urls.map((url, index) => <Image key={url} width={96} src={url} alt={`签收凭证 ${index + 1}`} />)}</Image.PreviewGroup> : '无签收凭证'}</Card>
+          <Card size="small" title="签收凭证" style={{ marginTop: 16 }}>
+            {detail.proof_image_urls.length || detail.signature_image_url ? (
+              <Image.PreviewGroup>
+                {detail.proof_image_urls.map((url, index) => <Image key={url} width={96} src={url} alt={`签收凭证 ${index + 1}`} />)}
+                {detail.signature_image_url && <Image width={160} src={detail.signature_image_url} alt="手写签名" />}
+              </Image.PreviewGroup>
+            ) : '无签收凭证'}
+          </Card>
           <Card size="small" title="配送商品" style={{ marginTop: 16 }}><Table rowKey="product_id" size="small" pagination={false} dataSource={detail.items} columns={[{ title: '商品', dataIndex: 'product_name' }, { title: '条码', dataIndex: 'barcode' }, { title: '数量', dataIndex: 'quantity' }]} /></Card>
           <Card size="small" title="配送轨迹" style={{ marginTop: 16 }}><Timeline items={detail.events.map((event) => ({ content: <span>{getDeliveryEventLabel(event.event_type)} · {event.operator_name} · {event.created_at}{event.exception_type ? ` · ${getDeliveryExceptionLabel(event.exception_type)}` : ''}{event.remark ? ` · ${event.remark}` : ''}</span> }))} /></Card>
         </>}

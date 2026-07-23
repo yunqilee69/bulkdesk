@@ -1,0 +1,51 @@
+# Resolve react_native_pods.rb with node to allow for hoisting
+require Pod::Executable.execute_command('node', ['-p',
+  'require.resolve(
+    "react-native/scripts/react_native_pods.rb",
+    {paths: [process.argv[1]]},
+  )', __dir__]).strip
+
+platform :ios, min_ios_version_supported
+prepare_react_native_project!
+
+linkage = ENV['USE_FRAMEWORKS']
+if linkage != nil
+  Pod::UI.puts "Configuring Pod with #{linkage}ally linked Frameworks".green
+  use_frameworks! :linkage => linkage.to_sym
+end
+
+target 'BulkDeskMobilePoc' do
+  config = use_native_modules!
+
+  use_react_native!(
+    :path => config[:reactNativePath],
+    # An absolute path to your application root.
+    :app_path => "#{Pod::Config.instance.installation_root}/.."
+  )
+
+  post_install do |installer|
+    react_native_post_install(
+      installer,
+      config[:reactNativePath],
+      :mac_catalyst_enabled => false,
+      # :ccache_enabled => true
+    )
+
+    glog_config_header = File.join(installer.sandbox.pod_dir('glog'), 'src/config.h')
+    File.chmod(0o644, glog_config_header)
+    File.write(glog_config_header, File.read(File.join(__dir__, 'glog-config.h')))
+
+    fmt_base_header = File.join(installer.sandbox.pod_dir('fmt'), 'include/fmt/base.h')
+    File.chmod(0o644, fmt_base_header)
+    fmt_contents = File.read(fmt_base_header)
+    fmt_contents.gsub!(
+      /^#elif defined\(__cpp_consteval\).*$/,
+      '#elif defined(__cpp_consteval) && !defined(__apple_build_version__)',
+    )
+    fmt_contents.gsub!(
+      /^#elif \(FMT_GCC_VERSION >= 1002 \|\| FMT_CLANG_VERSION >= 1101\).*$/,
+      '#elif (FMT_GCC_VERSION >= 1002 || FMT_CLANG_VERSION >= 1101) && !defined(__apple_build_version__)',
+    )
+    File.write(fmt_base_header, fmt_contents)
+  end
+end

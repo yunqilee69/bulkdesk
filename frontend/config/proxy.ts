@@ -1,4 +1,6 @@
-const apiTarget = process.env.API_TARGET || 'http://localhost:8000';
+export const defaultApiTarget = 'http://localhost:9000';
+
+const apiTarget = process.env.API_TARGET || defaultApiTarget;
 
 export default {
   dev: {

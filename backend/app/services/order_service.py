@@ -55,7 +55,11 @@ def _effective_order_price(
 ) -> Decimal:
     return standard_price if member_price is None else member_price
 
-async def create_order(db: AsyncSession, req: OrderCreate, operator: str) -> Order:
+async def create_placed_order(
+    db: AsyncSession,
+    req: OrderCreate,
+    operator: str | Employee,
+) -> Order:
     customer = (await db.execute(select(Customer).where(Customer.id == req.customer_id))).scalar_one_or_none()
     if not customer: raise ValueError("客户不存在")
     planned_items = []
@@ -106,7 +110,15 @@ async def create_order(db: AsyncSession, req: OrderCreate, operator: str) -> Ord
             inventory.locked += quantity
             db.add(OrderInventoryAllocation(order_id=order.id, order_item_id=order_item.id, product_id=product.id, warehouse_id=inventory.warehouse_id, quantity=quantity, status=OrderInventoryAllocationStatus.reserved))
     order.total_amount = total
-    db.add(OrderStatusLog(order_id=order.id, from_status=None, to_status=OrderStatus.placed, operator=operator, remark="订单创建")); await db.flush(); return order
+    db.add(OrderStatusLog(order_id=order.id, from_status=None, to_status=OrderStatus.placed, operator=_operator_username(operator), remark="订单创建")); await db.flush(); return order
+
+
+async def create_order(
+    db: AsyncSession,
+    req: OrderCreate,
+    operator: str | Employee,
+) -> Order:
+    return await create_placed_order(db, req, operator)
 
 async def _items(db: AsyncSession, order_id: str): return (await db.execute(select(OrderItem).where(OrderItem.order_id == order_id))).scalars().all()
 async def _allocations(db: AsyncSession, order_id: str): return (await db.execute(select(OrderInventoryAllocation).where(OrderInventoryAllocation.order_id == order_id))).scalars().all()

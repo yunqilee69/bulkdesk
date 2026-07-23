@@ -1,0 +1,9 @@
+{
+  "license": "UNLICENSED",
+  "devDependencies": {},
+  "name": "entry",
+  "description": "BulkDesk Harmony entry module",
+  "version": "1.0.0",
+  "dependencies": {
+  }
+}

@@ -120,6 +120,7 @@ class OrderDeliveryDetailOut(OrderDeliverySummaryOut):
     assigned_by_id: str
     assigned_by_name: str
     proof_image_urls: list[str] = Field(default_factory=list)
+    signature_image_url: Optional[str] = None
     sign_remark: Optional[str] = None
     signed_by_id: Optional[str] = None
     signed_by_name: Optional[str] = None
@@ -191,6 +192,7 @@ class OrderDeliveryArchiveOut(OrderDeliverySummaryOut):
     total_amount: float
     product_quantity: int
     proof_image_urls: list[str] = Field(default_factory=list)
+    signature_image_url: Optional[str] = None
     sign_remark: Optional[str] = None
 
     @field_validator("proof_image_urls", mode="before")
@@ -242,6 +244,7 @@ class OrderDeliveryExceptionRequest(ApiSchema):
 class OrderDeliverySignRequest(ApiSchema):
     signer_name: str = Field(..., min_length=1, max_length=100)
     proof_image_urls: list[str] = Field(default_factory=list)
+    signature_image_url: Optional[str] = Field(None, max_length=1000)
     remark: Optional[str] = Field(None, max_length=500)
     collect_payment: bool = False
     paid_amount: Optional[Decimal] = Field(None, gt=Decimal("0"))
@@ -256,6 +259,13 @@ class OrderDeliverySignRequest(ApiSchema):
     @classmethod
     def trim_remark(cls, value: object) -> object:
         return _trim_optional(value)
+
+    @field_validator("signature_image_url", mode="before")
+    @classmethod
+    def trim_signature_image_url(cls, value: object) -> object:
+        if value is None:
+            return None
+        return _trim_required(value)
 
     @field_validator("payment_proof_image_urls", mode="before")
     @classmethod

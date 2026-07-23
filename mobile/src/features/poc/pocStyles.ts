@@ -1,0 +1,108 @@
+import { StyleSheet } from 'react-native';
+
+export const pocStyles = StyleSheet.create({
+  actionGroup: {
+    gap: 10,
+    marginTop: 12,
+  },
+  badge: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#E8F1FF',
+    borderRadius: 999,
+    color: '#165DFF',
+    fontSize: 12,
+    fontWeight: '700',
+    overflow: 'hidden',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+  },
+  body: {
+    color: '#4E5969',
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  buttonRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  cameraPreview: {
+    backgroundColor: '#111827',
+    borderRadius: 12,
+    height: 260,
+    overflow: 'hidden',
+  },
+  card: {
+    backgroundColor: '#FFFFFF',
+    borderColor: '#E5E6EB',
+    borderRadius: 16,
+    borderWidth: 1,
+    gap: 10,
+    marginBottom: 14,
+    padding: 16,
+  },
+  container: {
+    backgroundColor: '#F7F8FA',
+    flex: 1,
+  },
+  content: {
+    padding: 16,
+    paddingBottom: 40,
+  },
+  input: {
+    backgroundColor: '#FFFFFF',
+    borderColor: '#C9CDD4',
+    borderRadius: 10,
+    borderWidth: 1,
+    color: '#1D2129',
+    minHeight: 42,
+    paddingHorizontal: 12,
+  },
+  mono: {
+    color: '#1D2129',
+    fontFamily: 'Menlo',
+    fontSize: 12,
+  },
+  sectionTitle: {
+    color: '#1D2129',
+    fontSize: 17,
+    fontWeight: '700',
+  },
+  signaturePad: {
+    backgroundColor: '#F2F3F5',
+    borderColor: '#C9CDD4',
+    borderRadius: 12,
+    borderStyle: 'dashed',
+    borderWidth: 1,
+    height: 160,
+    overflow: 'hidden',
+  },
+  signaturePlaceholder: {
+    alignItems: 'center',
+    bottom: 0,
+    justifyContent: 'center',
+    left: 0,
+    position: 'absolute',
+    right: 0,
+    top: 0,
+  },
+  signatureStroke: {
+    backgroundColor: '#111827',
+    borderRadius: 999,
+    height: 4,
+    position: 'absolute',
+  },
+  signatureStrokeDot: {
+    backgroundColor: '#111827',
+    borderRadius: 3,
+    height: 6,
+    position: 'absolute',
+    width: 6,
+  },
+  title: {
+    color: '#111827',
+    fontSize: 24,
+    fontWeight: '800',
+    marginBottom: 8,
+  },
+});

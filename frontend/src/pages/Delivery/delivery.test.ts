@@ -181,6 +181,7 @@ describe('delivery services', () => {
     const signInput: OrderDeliverySignInput = {
       signer_name: '张三',
       remark: '已签收',
+      signature_image_url: 'https://storage/signature.png',
     };
     await signDelivery('delivery-1', signInput);
 
@@ -224,6 +225,7 @@ describe('delivery services', () => {
           data: {
             signer_name: '张三',
             remark: '已签收',
+            signature_image_url: 'https://storage/signature.png',
           },
         },
       ],
