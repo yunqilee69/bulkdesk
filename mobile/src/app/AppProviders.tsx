@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import React, { createContext, useCallback, useEffect, useMemo, useState } from 'react';
-import { Text, View } from 'react-native';
-import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { StatusBar, StyleSheet, Text, View } from 'react-native';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
 import { getCurrentUser, login, type CurrentUser } from '../api/auth';
 import { createApiClient } from '../api/client';
@@ -88,13 +88,13 @@ export function AppProviders() {
   let content: React.ReactNode;
   if (restoring) {
     content = (
-      <View>
+      <View style={styles.screenFill}>
         <Text>正在恢复会话...</Text>
       </View>
     );
   } else if (!currentUser) {
     content = (
-      <View>
+      <View style={styles.screenFill}>
         <LoginScreen onLogin={(username, password) => { handleLogin(username, password).catch(() => undefined); }} />
         {authError ? <Text>{authError}</Text> : null}
       </View>
@@ -105,13 +105,28 @@ export function AppProviders() {
 
   return (
     <SafeAreaProvider>
+      <StatusBar backgroundColor={styles.safeAreaFrame.backgroundColor} barStyle="dark-content" translucent={false} />
       <QueryClientProvider client={queryClient}>
         <SessionContext.Provider value={session}>
           <ApiClientContext.Provider value={apiClient}>
-            <CartProvider>{content}</CartProvider>
+            <CartProvider>
+              <SafeAreaView testID="MobileSafeAreaFrame" edges={['top']} style={styles.safeAreaFrame}>
+                {content}
+              </SafeAreaView>
+            </CartProvider>
           </ApiClientContext.Provider>
         </SessionContext.Provider>
       </QueryClientProvider>
     </SafeAreaProvider>
   );
 }
+
+const styles = StyleSheet.create({
+  safeAreaFrame: {
+    backgroundColor: '#f2f4f7',
+    flex: 1,
+  },
+  screenFill: {
+    flex: 1,
+  },
+});

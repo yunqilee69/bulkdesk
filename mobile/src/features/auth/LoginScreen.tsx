@@ -1,13 +1,12 @@
 import React, { useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 
 export function LoginScreen({ onLogin }: { onLogin?: (username: string, password: string) => void }) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <View style={styles.safeArea}>
       <View testID="LoginScreenContainer" style={[styles.container]}>
         <View testID="LoginFormCard" style={[styles.card]}>
           <Text style={styles.title}>BulkDesk 登录</Text>
@@ -42,7 +41,7 @@ export function LoginScreen({ onLogin }: { onLogin?: (username: string, password
           </Pressable>
         </View>
       </View>
-    </SafeAreaView>
+    </View>
   );
 }
 
